@@ -1,0 +1,697 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Drawbot GUI</title>
+<style>
+  :root {
+    --bg:      #0d1117;
+    --surface: #161b22;
+    --border:  #30363d;
+    --accent:  #58a6ff;
+    --text:    #c9d1d9;
+    --muted:   #8b949e;
+    --success: #3fb950;
+    --danger:  #f85149;
+    --warn:    #d29922;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 13px;
+    min-height: 100vh;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  /* ── Header ─────────────────────────────────────────────────────── */
+  #header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  #header h1 { font-size: 16px; font-weight: 600; letter-spacing: 1px; color: var(--accent); }
+  #status-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--danger);
+    flex-shrink: 0;
+    margin-left: auto;
+  }
+  #status-text { color: var(--muted); font-size: 12px; }
+
+  /* ── Panels grid ─────────────────────────────────────────────────── */
+  #main-grid {
+    display: grid;
+    grid-template-columns: 220px 1fr 220px;
+    gap: 12px;
+  }
+
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+  }
+  .panel-title {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* ── Controls ────────────────────────────────────────────────────── */
+  #dpad {
+    display: grid;
+    grid-template-columns: repeat(3, 52px);
+    grid-template-rows: repeat(3, 52px);
+    gap: 4px;
+    justify-content: center;
+    margin-bottom: 12px;
+  }
+  .dpad-btn {
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 18px;
+    cursor: pointer;
+    transition: background 0.1s, transform 0.05s;
+    display: flex; align-items: center; justify-content: center;
+    user-select: none;
+  }
+  .dpad-btn:hover  { background: #2d333b; }
+  .dpad-btn:active { background: var(--accent); color: #000; transform: scale(0.95); }
+  .dpad-btn.stop   { background: #3d1a1a; border-color: var(--danger); font-size: 14px; }
+  .dpad-btn.stop:hover  { background: #5a2020; }
+  .dpad-btn.stop:active { background: var(--danger); color: #000; }
+  .dpad-empty { background: transparent; border: none; }
+
+  #speed-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+  #speed-row label { color: var(--muted); font-size: 11px; white-space: nowrap; }
+  #speed-slider { flex: 1; accent-color: var(--accent); }
+  #speed-val { color: var(--accent); font-weight: 600; width: 28px; text-align: right; }
+
+  #extra-btns { display: flex; gap: 6px; margin-top: 10px; }
+  .action-btn {
+    flex: 1;
+    padding: 6px 4px;
+    background: #21262d;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--text);
+    font-size: 11px;
+    cursor: pointer;
+    transition: background 0.1s;
+  }
+  .action-btn:hover { background: #2d333b; color: var(--accent); border-color: var(--accent); }
+
+  /* ── Sensor data ─────────────────────────────────────────────────── */
+  .sensor-group { margin-bottom: 10px; }
+  .sensor-group-title {
+    font-size: 10px;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 5px;
+    letter-spacing: 0.5px;
+  }
+  .sensor-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+    border-bottom: 1px solid #1c2128;
+  }
+  .sensor-row:last-child { border-bottom: none; }
+  .sensor-label { color: var(--muted); }
+  .sensor-val { font-family: 'Courier New', monospace; color: var(--text); min-width: 80px; text-align: right; }
+
+  .encoder-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 5px 0;
+    border-bottom: 1px solid #1c2128;
+  }
+  .encoder-row:last-child { border-bottom: none; }
+  .enc-label { color: var(--muted); font-size: 11px; }
+  .enc-vals { text-align: right; }
+  .enc-ticks { font-family: monospace; color: var(--text); font-size: 12px; }
+  .enc-rpm   { font-size: 10px; color: var(--accent); margin-top: 1px; }
+
+  /* ── Position panels ─────────────────────────────────────────────── */
+  #right-col { display: flex; flex-direction: column; gap: 12px; }
+
+  .pos-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+    margin-top: 4px;
+  }
+  .pos-item { text-align: center; }
+  .pos-item-label { font-size: 10px; color: var(--muted); margin-bottom: 2px; }
+  .pos-item-val {
+    font-size: 18px;
+    font-weight: 600;
+    font-family: monospace;
+    color: var(--text);
+  }
+  .pos-item-unit { font-size: 10px; color: var(--muted); margin-left: 2px; }
+  .pos-reset-btn {
+    display: block;
+    width: 100%;
+    margin-top: 8px;
+    padding: 4px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+  .pos-reset-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  /* ── Canvas section ──────────────────────────────────────────────── */
+  #canvas-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+  }
+  #canvas-header {
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  #canvas-title { font-size: 10px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+  #canvas-legend { font-size: 10px; color: var(--muted); }
+  #canvas-reset-btn {
+    padding: 4px 12px;
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 0.1s;
+  }
+  #canvas-reset-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+  #traj {
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #0a0e13;
+    display: block;
+  }
+  .imu-drift-note {
+    font-size: 10px;
+    color: var(--warn);
+    margin-top: 4px;
+    padding: 4px 6px;
+    background: #2a200a;
+    border-radius: 4px;
+    border-left: 2px solid var(--warn);
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Header ────────────────────────────────────────────────────────────── -->
+<div id="header">
+  <h1>DRAWBOT</h1>
+  <span style="color:var(--muted);font-size:11px;">ws://localhost:8765</span>
+  <div id="status-dot"></div>
+  <span id="status-text">Déconnecté</span>
+</div>
+
+<!-- ── Main grid ─────────────────────────────────────────────────────────── -->
+<div id="main-grid">
+
+  <!-- Colonne gauche : contrôle -->
+  <div class="panel">
+    <div class="panel-title">Contrôle</div>
+
+    <div id="dpad">
+      <div class="dpad-empty"></div>
+      <button class="dpad-btn" id="btn-up"    onmousedown="startCmd('F')" onmouseup="stopCmd()" ontouchstart="startCmd('F')" ontouchend="stopCmd()">↑</button>
+      <div class="dpad-empty"></div>
+
+      <button class="dpad-btn" id="btn-left"  onmousedown="startCmd('L')" onmouseup="stopCmd()" ontouchstart="startCmd('L')" ontouchend="stopCmd()">←</button>
+      <button class="dpad-btn stop"            onmousedown="sendCmd('S')"  ontouchstart="sendCmd('S')">■</button>
+      <button class="dpad-btn" id="btn-right" onmousedown="startCmd('R')" onmouseup="stopCmd()" ontouchstart="startCmd('R')" ontouchend="stopCmd()">→</button>
+
+      <div class="dpad-empty"></div>
+      <button class="dpad-btn" id="btn-down"  onmousedown="startCmd('B')" onmouseup="stopCmd()" ontouchstart="startCmd('B')" ontouchend="stopCmd()">↓</button>
+      <div class="dpad-empty"></div>
+    </div>
+
+    <div id="speed-row">
+      <label>Vitesse</label>
+      <input type="range" id="speed-slider" min="50" max="255" value="150"
+             oninput="speed=parseInt(this.value);document.getElementById('speed-val').textContent=speed">
+      <span id="speed-val">150</span>
+    </div>
+
+    <div id="extra-btns">
+      <button class="action-btn" onclick="sendCmd('CORNER_LEFT:'+speed)">↺ Coin G</button>
+      <button class="action-btn" onclick="sendCmd('CORNER_RIGHT:'+speed)">↻ Coin D</button>
+      <button class="action-btn" onclick="sendCmd('RESET_ENC')">Reset enc</button>
+    </div>
+
+    <div style="margin-top:10px;font-size:10px;color:var(--muted);text-align:center;">
+      Touches clavier : ↑↓←→ / Espace = stop
+    </div>
+  </div>
+
+  <!-- Colonne centre : capteurs -->
+  <div style="display:flex;flex-direction:column;gap:12px;">
+
+    <!-- IMU -->
+    <div class="panel">
+      <div class="panel-title">IMU — LSM6DS3</div>
+      <div class="sensor-group">
+        <div class="sensor-group-title">Accéléromètre (m/s²)</div>
+        <div class="sensor-row"><span class="sensor-label">Ax</span><span class="sensor-val" id="ax">—</span></div>
+        <div class="sensor-row"><span class="sensor-label">Ay</span><span class="sensor-val" id="ay">—</span></div>
+        <div class="sensor-row"><span class="sensor-label">Az</span><span class="sensor-val" id="az">—</span></div>
+      </div>
+      <div class="sensor-group">
+        <div class="sensor-group-title">Gyroscope (°/s)</div>
+        <div class="sensor-row"><span class="sensor-label">Gx</span><span class="sensor-val" id="gx">—</span></div>
+        <div class="sensor-row"><span class="sensor-label">Gy</span><span class="sensor-val" id="gy">—</span></div>
+        <div class="sensor-row"><span class="sensor-label">Gz</span><span class="sensor-val" id="gz">—</span></div>
+      </div>
+    </div>
+
+    <!-- Magnétomètre -->
+    <div class="panel">
+      <div class="panel-title">Magnétomètre — LIS3MDL</div>
+      <div class="sensor-group">
+        <div class="sensor-group-title">Champ magnétique (mGauss)</div>
+        <div class="sensor-row"><span class="sensor-label">Mx</span><span class="sensor-val" id="mx">—</span></div>
+        <div class="sensor-row"><span class="sensor-label">My</span><span class="sensor-val" id="my">—</span></div>
+        <div class="sensor-row"><span class="sensor-label">Mz</span><span class="sensor-val" id="mz">—</span></div>
+      </div>
+    </div>
+
+    <!-- Encodeurs -->
+    <div class="panel">
+      <div class="panel-title">Encodeurs</div>
+      <div class="encoder-row">
+        <span class="enc-label">Roue Droite</span>
+        <div class="enc-vals">
+          <div class="enc-ticks"><span id="enc-r">—</span> ticks</div>
+          <div class="enc-rpm"><span id="rpm-r">—</span> tr/min</div>
+        </div>
+      </div>
+      <div class="encoder-row">
+        <span class="enc-label">Roue Gauche</span>
+        <div class="enc-vals">
+          <div class="enc-ticks"><span id="enc-l">—</span> ticks</div>
+          <div class="enc-rpm"><span id="rpm-l">—</span> tr/min</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Colonne droite : position -->
+  <div id="right-col">
+
+    <!-- Position encodeurs -->
+    <div class="panel">
+      <div class="panel-title">Position — Encodeurs</div>
+      <div class="pos-grid">
+        <div class="pos-item">
+          <div class="pos-item-label">X</div>
+          <div class="pos-item-val"><span id="pos-enc-x">0.0</span><span class="pos-item-unit">cm</span></div>
+        </div>
+        <div class="pos-item">
+          <div class="pos-item-label">Y</div>
+          <div class="pos-item-val"><span id="pos-enc-y">0.0</span><span class="pos-item-unit">cm</span></div>
+        </div>
+        <div class="pos-item" style="grid-column:1/-1;">
+          <div class="pos-item-label">Orientation θ</div>
+          <div class="pos-item-val"><span id="pos-enc-h">0.0</span><span class="pos-item-unit">°</span></div>
+        </div>
+      </div>
+      <button class="pos-reset-btn" onclick="resetEncPos()">Réinitialiser position</button>
+    </div>
+
+    <!-- Position IMU -->
+    <div class="panel">
+      <div class="panel-title">Position — IMU</div>
+      <div class="pos-grid">
+        <div class="pos-item">
+          <div class="pos-item-label">X</div>
+          <div class="pos-item-val"><span id="pos-imu-x">0.0</span><span class="pos-item-unit">cm</span></div>
+        </div>
+        <div class="pos-item">
+          <div class="pos-item-label">Y</div>
+          <div class="pos-item-val"><span id="pos-imu-y">0.0</span><span class="pos-item-unit">cm</span></div>
+        </div>
+        <div class="pos-item" style="grid-column:1/-1;">
+          <div class="pos-item-label">Orientation θ</div>
+          <div class="pos-item-val"><span id="pos-imu-h">0.0</span><span class="pos-item-unit">°</span></div>
+        </div>
+      </div>
+      <button class="pos-reset-btn" onclick="resetImuPos()">Réinitialiser position</button>
+      <div class="imu-drift-note">⚠ La double intégration de l'accéléromètre accumule du drift. La position IMU est indicative.</div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Trajectory canvas ──────────────────────────────────────────────────── -->
+<div class="panel">
+  <div id="canvas-header">
+    <span id="canvas-title">Trajectoire du stylo</span>
+    <span id="canvas-legend">—</span>
+    <button id="canvas-reset-btn" onclick="resetCanvas()">Effacer</button>
+  </div>
+  <div id="canvas-section">
+    <canvas id="traj" width="900" height="300"></canvas>
+  </div>
+</div>
+
+<script>
+// ── Constantes ────────────────────────────────────────────────────────────────
+const WS_URL       = 'ws://localhost:8765';
+const CM_PER_TICK  = 28.27 / 2008;
+const TRACK_W      = 8.1;
+const TICKS_PER_REV = 2008;
+
+// ── État ──────────────────────────────────────────────────────────────────────
+let speed = 150;
+let ws    = null;
+
+// Dead reckoning (encodeurs)
+let encState = { x:0, y:0, heading:0, prevR:null, prevL:null };
+
+// Intégration IMU
+let imuState = { x:0, y:0, heading:0, vx:0, vy:0, prevTs:null };
+
+// RPM
+let prevEncSnap = null;
+let prevEncTs   = null;
+
+// Canvas
+const canvas = document.getElementById('traj');
+const ctx    = canvas.getContext('2d');
+let trajPoints = [];   // {x, y} en cm (référentiel robot)
+
+// ── Helpers DOM ───────────────────────────────────────────────────────────────
+function setText(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function sendCmd(cmd) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'cmd', cmd }));
+  }
+}
+
+let activeKey = null;
+function startCmd(dir) {
+  sendCmd(`${dir}:${speed}`);
+}
+function stopCmd() {
+  sendCmd('S');
+}
+
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+
+  ws.onopen = () => {
+    document.getElementById('status-dot').style.background  = 'var(--success)';
+    document.getElementById('status-text').textContent = 'Connecté';
+  };
+  ws.onclose = () => {
+    document.getElementById('status-dot').style.background  = 'var(--danger)';
+    document.getElementById('status-text').textContent = 'Déconnecté — reconnexion…';
+    setTimeout(connectWS, 3000);
+  };
+  ws.onerror = () => {};
+  ws.onmessage = (ev) => {
+    try {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === 'telemetry') handleTelemetry(msg);
+      if (msg.type === 'status')    handleStatus(msg);
+    } catch (_) {}
+  };
+}
+
+function handleStatus(msg) {
+  if (msg.connected) {
+    document.getElementById('status-dot').style.background = 'var(--success)';
+    document.getElementById('status-text').textContent = 'Connecté';
+  } else {
+    document.getElementById('status-dot').style.background = 'var(--warn)';
+    document.getElementById('status-text').textContent = 'Robot déconnecté';
+  }
+}
+
+// ── Traitement télémétrie ─────────────────────────────────────────────────────
+function handleTelemetry(d) {
+  // IMU
+  if (d.ax !== undefined) {
+    setText('ax', d.ax.toFixed(4));
+    setText('ay', d.ay.toFixed(4));
+    setText('az', d.az.toFixed(4));
+    setText('gx', d.gx.toFixed(4));
+    setText('gy', d.gy.toFixed(4));
+    setText('gz', d.gz.toFixed(4));
+    updateImuPosition(d.ax, d.ay, d.gz, d.ts);
+    setText('pos-imu-x', imuState.x.toFixed(1));
+    setText('pos-imu-y', imuState.y.toFixed(1));
+    setText('pos-imu-h', (imuState.heading * 180 / Math.PI).toFixed(1));
+  }
+
+  // Magnétomètre
+  if (d.mx !== undefined) {
+    setText('mx', d.mx.toFixed(2));
+    setText('my', d.my.toFixed(2));
+    setText('mz', d.mz.toFixed(2));
+  }
+
+  // Encodeurs
+  if (d.enc_r !== undefined) {
+    setText('enc-r', d.enc_r);
+    setText('enc-l', d.enc_l);
+
+    const rpm = computeRPM(d.enc_r, d.enc_l, d.ts);
+    setText('rpm-r', rpm.rpmR);
+    setText('rpm-l', rpm.rpmL);
+
+    updateEncPosition(d.enc_r, d.enc_l);
+    setText('pos-enc-x', encState.x.toFixed(1));
+    setText('pos-enc-y', encState.y.toFixed(1));
+    setText('pos-enc-h', (encState.heading * 180 / Math.PI).toFixed(1));
+  }
+}
+
+// ── Dead reckoning encodeurs ──────────────────────────────────────────────────
+function updateEncPosition(enc_r, enc_l) {
+  if (encState.prevR === null) {
+    encState.prevR = enc_r;
+    encState.prevL = enc_l;
+    return;
+  }
+  const dr = (enc_r - encState.prevR) * CM_PER_TICK;
+  const dl = (enc_l - encState.prevL) * CM_PER_TICK;
+  encState.prevR = enc_r;
+  encState.prevL = enc_l;
+
+  const ds     = (dr + dl) / 2;
+  const dTheta = (dr - dl) / TRACK_W;
+  encState.heading += dTheta;
+  encState.x += ds * Math.cos(encState.heading);
+  encState.y += ds * Math.sin(encState.heading);
+
+  if (Math.abs(ds) > 0.01) {
+    trajPoints.push({ x: encState.x, y: encState.y });
+    redrawCanvas();
+  }
+}
+
+// ── Intégration IMU ───────────────────────────────────────────────────────────
+function updateImuPosition(ax, ay, gz, ts) {
+  if (imuState.prevTs === null) {
+    imuState.prevTs = ts;
+    return;
+  }
+  const dt = ts - imuState.prevTs;
+  imuState.prevTs = ts;
+  if (dt <= 0 || dt > 1.0) return;  // sauts de temps aberrants
+
+  // Intégrer cap (gyro Z → rad/s)
+  imuState.heading += gz * (Math.PI / 180) * dt;
+
+  // Accel dans le référentiel monde (rotation 2D)
+  const c = Math.cos(imuState.heading);
+  const s = Math.sin(imuState.heading);
+  const ax_w = ax * c - ay * s;
+  const ay_w = ax * s + ay * c;
+
+  // Double intégration (très bruité mais demandé par le sujet)
+  imuState.vx += ax_w * dt;
+  imuState.vy += ay_w * dt;
+  imuState.x  += imuState.vx * dt;
+  imuState.y  += imuState.vy * dt;
+}
+
+// ── RPM ───────────────────────────────────────────────────────────────────────
+function computeRPM(enc_r, enc_l, ts) {
+  if (prevEncTs === null) {
+    prevEncSnap = { r: enc_r, l: enc_l };
+    prevEncTs   = ts;
+    return { rpmR: '0.0', rpmL: '0.0' };
+  }
+  const dt = ts - prevEncTs;
+  if (dt < 0.001) return { rpmR: '—', rpmL: '—' };
+
+  const dR   = Math.abs(enc_r - prevEncSnap.r);
+  const dL   = Math.abs(enc_l - prevEncSnap.l);
+  const rpmR = ((dR / TICKS_PER_REV) / dt * 60).toFixed(1);
+  const rpmL = ((dL / TICKS_PER_REV) / dt * 60).toFixed(1);
+
+  prevEncSnap = { r: enc_r, l: enc_l };
+  prevEncTs   = ts;
+  return { rpmR, rpmL };
+}
+
+// ── Canvas trajectoire ────────────────────────────────────────────────────────
+function redrawCanvas() {
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Grille
+  ctx.strokeStyle = '#1a1f28';
+  ctx.lineWidth   = 0.5;
+  const step = 40;
+  for (let x = 0; x <= W; x += step) {
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  for (let y = 0; y <= H; y += step) {
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+  }
+
+  if (trajPoints.length < 2) return;
+
+  // Bounding box + auto-scale
+  const xs = trajPoints.map(p => p.x);
+  const ys = trajPoints.map(p => p.y);
+  let minX = Math.min(...xs), maxX = Math.max(...xs);
+  let minY = Math.min(...ys), maxY = Math.max(...ys);
+  const rangeX = Math.max(maxX - minX, 5);   // 5 cm minimum pour éviter le zoom infini
+  const rangeY = Math.max(maxY - minY, 5);
+  const pad     = 30;
+  const scaleX  = (W - 2 * pad) / rangeX;
+  const scaleY  = (H - 2 * pad) / rangeY;
+  const scale   = Math.min(scaleX, scaleY);
+  const offX    = pad + ((W - 2 * pad) - rangeX * scale) / 2;
+  const offY    = pad + ((H - 2 * pad) - rangeY * scale) / 2;
+
+  const toCx = (x) => offX + (x - minX) * scale;
+  const toCy = (y) => offY + (y - minY) * scale;
+
+  // Tracé
+  ctx.strokeStyle = '#58a6ff';
+  ctx.lineWidth   = 2;
+  ctx.lineJoin    = 'round';
+  ctx.beginPath();
+  ctx.moveTo(toCx(trajPoints[0].x), toCy(trajPoints[0].y));
+  for (let i = 1; i < trajPoints.length; i++) {
+    ctx.lineTo(toCx(trajPoints[i].x), toCy(trajPoints[i].y));
+  }
+  ctx.stroke();
+
+  // Point de départ (blanc)
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath();
+  ctx.arc(toCx(trajPoints[0].x), toCy(trajPoints[0].y), 4, 0, 2 * Math.PI);
+  ctx.fill();
+
+  // Position actuelle (vert)
+  const last = trajPoints[trajPoints.length - 1];
+  ctx.fillStyle = '#3fb950';
+  ctx.beginPath();
+  ctx.arc(toCx(last.x), toCy(last.y), 5, 0, 2 * Math.PI);
+  ctx.fill();
+
+  // Légende de l'échelle
+  const cmPerPx = 1 / scale;
+  document.getElementById('canvas-legend').textContent =
+    `1px ≈ ${cmPerPx.toFixed(2)} cm | ${trajPoints.length} pts`;
+}
+
+// ── Resets ────────────────────────────────────────────────────────────────────
+function resetEncPos() {
+  encState = { x:0, y:0, heading:0, prevR:null, prevL:null };
+  trajPoints = [];
+  redrawCanvas();
+  setText('pos-enc-x', '0.0');
+  setText('pos-enc-y', '0.0');
+  setText('pos-enc-h', '0.0');
+}
+
+function resetImuPos() {
+  imuState = { x:0, y:0, heading:0, vx:0, vy:0, prevTs:null };
+  setText('pos-imu-x', '0.0');
+  setText('pos-imu-y', '0.0');
+  setText('pos-imu-h', '0.0');
+}
+
+function resetCanvas() {
+  trajPoints = [];
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  document.getElementById('canvas-legend').textContent = '—';
+}
+
+// ── Clavier ───────────────────────────────────────────────────────────────────
+const KEY_MAP = { ArrowUp:'F', ArrowDown:'B', ArrowLeft:'L', ArrowRight:'R' };
+
+document.addEventListener('keydown', (e) => {
+  if (e.repeat) return;
+  if (KEY_MAP[e.key]) {
+    e.preventDefault();
+    activeKey = e.key;
+    sendCmd(`${KEY_MAP[e.key]}:${speed}`);
+  }
+  if (e.key === ' ') {
+    e.preventDefault();
+    activeKey = null;
+    sendCmd('S');
+  }
+});
+document.addEventListener('keyup', (e) => {
+  if (e.key === activeKey) {
+    activeKey = null;
+    sendCmd('S');
+  }
+});
+
+// ── Démarrage ─────────────────────────────────────────────────────────────────
+redrawCanvas();
+connectWS();
+</script>
+</body>
+</html>
