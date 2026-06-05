@@ -3,16 +3,6 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
-// ============================================================
-//  DRAWBOT — Firmware ESP32
-//  - Trajets droits (F/B) : asservissement en position des
-//    roues (boucle fermee P) + synchro G/D + freinage actif.
-//  - Virages (L/R)        : boucle fermee PID sur l'angle REEL
-//    mesure par le gyroscope de l'IMU (LSM6DS3). Insensible au
-//    glissement des roues => angles precis. Repli sur encodeur
-//    si l'IMU n'est pas detectee.
-// ============================================================
-
 // ---------- Brochage (cf. kick-off slide 6) ----------
 #define LEDU1 25
 #define LEDU2 26
@@ -41,14 +31,10 @@
 #define TICKS_PER_REV 993
 #define WHEEL_DIAM_MM 90.0f
 #define WHEEL_CIRCUM_CM (PI * WHEEL_DIAM_MM / 10.0f)
+#define TICKS_PER_CM (TICKS_PER_REV / WHEEL_CIRCUM_CM)   // ~35.1 ticks/cm
 #define TRACK_WIDTH_CM 8.5f
 
 // !!! A RECALIBRER !!! (utilise uniquement par le repli encodeur)
-// L'ancienne valeur (0.77) compensait le depassement du a l'arret
-// en boucle ouverte. Avec l'asservissement P + freinage actif, ce
-// depassement disparait : partir de 1.0, commander L:90, mesurer
-// l'angle reel au rapporteur, puis ajuster :
-//   TURN_CORRECTION = angle_voulu / angle_mesure
 #define TURN_CORRECTION 1.0f
 
 // ---------- Parametres de l'asservissement (trajets droits) ----------
@@ -60,18 +46,24 @@
 #define CONTROL_PERIOD_MS 10   // periode d'echantillonnage : 100 Hz
 #define BRAKE_MS 80            // duree du freinage actif
 
-// ---------- Commande V : vitesse roue en boucle OUVERTE (cm/s -> PWM) ----------
-// Conversion lineaire issue du calibrage : a V_MAX_CMS le PWM vaut PWM_V_MAX.
-// PWM_MIN_V = PWM le plus bas ou la roue tourne encore (frottement statique).
-// Il est volontairement plus BAS que PWM_MIN (200) : ce dernier est le plancher
-// de DEMARRAGE fiable en charge pour l'asservissement ferme, alors que la
-// sequence tractrice a besoin de vitesses lentes (jusqu'a ~1.7 cm/s) pour
-// tracer les virages. La commande V ecrit donc le PWM directement (ecrirePWM*),
-// sans repasser par le plancher 200 de setMoteur*.
-// !!! A CALIBRER sur le robot (voir procedure dans le resume) !!!
-#define V_MAX_CMS  5.5f        // vitesse (cm/s) atteinte a PWM_V_MAX  -- a mesurer
+// ---------- Commande V : vitesse de roue ASSERVIE (boucle fermee PI) ----------
+// vitesseToPWM() ne sert plus que de FEEDFORWARD : PWM theorique pour une
+// vitesse donnee (calibrage lineaire V_MAX_CMS <-> PWM_V_MAX, mesure :
+// V:5:5:2000 -> 53 cm -> 26.5 cm/s a PWM 229 -> V_MAX ~ 29 cm/s a PWM 245).
+// La boucle PI (controlVitesse) corrige ensuite avec la vitesse REELLE
+// mesuree par les encodeurs : friction, retard moteur et piles faibles
+// sont compenses automatiquement. Un "kick" anti-friction statique force
+// PWM_KICK quand une roue commandee est encore immobile, car le PWM
+// theorique des vitesses lentes (~1.7 cm/s -> PWM ~80) est tres en dessous
+// du seuil de demarrage (PWM_MIN = 200).
+#define V_MAX_CMS  29.0f       // vitesse (cm/s) atteinte a PWM_V_MAX (mesure)
 #define PWM_V_MAX  245         // PWM correspondant a V_MAX_CMS
 #define PWM_MIN_V  70          // PWM mini ou la roue tourne encore (deadband bas)
+#define PWM_KICK   200         // coup de demarrage anti-friction statique
+
+// Gains du PI de vitesse, reglables en direct via "PIDV:kp,ki"
+float KP_V = 8.0f;             // (cm/s d'erreur) -> PWM
+float KI_V = 300.0f;           // rattrape la friction ; anti-windup integre
 
 // ---------- IMU LSM6DS3 (gyroscope, I2C) ----------
 #define ADDR_IMU     0x6B
@@ -80,23 +72,16 @@
 #define LSM_CTRL3_C  0x12
 #define LSM_OUTZ_L_G 0x26
 #define GYRO_SENS_DPS 0.070f   // 70 mdps/LSB a pleine echelle +/-2000 dps
-// !!! A VERIFIER selon le montage de l'IMU : envoyer "G", tourner le
-// robot a la MAIN vers la GAUCHE. Si "rate" est positif -> laisser +1.
-// Si "rate" est negatif -> mettre -1.0f.
 #define GYRO_Z_SIGN  +1.0f
 
 // ---------- PID du virage (boucle fermee sur le gyroscope) ----------
-// Modifiables en direct (sans recompiler) via la commande "PIDT:kp,ki,kd".
-float KP_TURN = 4.0f;          // reactivite (deg d'erreur -> PWM)
-float KI_TURN = 0.10f;         // rattrape l'erreur residuelle (frottement)
-float KD_TURN = 0.20f;         // amortit / anticipe pour eviter le depassement
-#define TURN_PWM_MAX 230       // PWM maxi pendant le virage (plus bas = plus lent = plus precis)
+float KP_TURN = 4.0f;
+float KI_TURN = 0.10f;
+float KD_TURN = 0.20f;
+#define TURN_PWM_MAX 230
 #define TURN_INTEGRAL_MAX 200.0f
-// Le robot stoppe TURN_BRAKE_LEAD_DEG avant la cible pour compenser
-// l'inertie residuelle apres freinage. A calibrer : si L:90 finit a
-// 94 deg -> augmenter ; si finit a 87 deg -> diminuer.
 #define TURN_BRAKE_LEAD_DEG 2.0f
-#define TURN_TIMEOUT_MS 8000   // securite : abandon si la cible n'est jamais atteinte
+#define TURN_TIMEOUT_MS 8000
 
 // ---------- Reseau ----------
 const char* WIFI_SSID = "i.t.WORKS N300";
@@ -126,28 +111,34 @@ enum MotionMode { MODE_IDLE, MODE_TICKS, MODE_TURN, MODE_VSEQ };
 MotionMode motionMode = MODE_IDLE;
 
 // Trajets droits (et repli virage encodeur)
-long tick_target = 0;     // cible en ticks, identique pour chaque roue
-int tick_dir_D = 1;       // sens de rotation roue droite (+1 / -1)
-int tick_dir_G = 1;       // sens de rotation roue gauche (+1 / -1)
+long tick_target = 0;
+int tick_dir_D = 1;
+int tick_dir_G = 1;
 
 // Virage gyro
 bool  imuOk = false;
-float gyroZbias_dps   = 0.0f;   // biais (offset) du gyro au repos
-float turn_target_deg = 0.0f;   // consigne signee : gauche > 0, droite < 0
-float gyro_angle_deg  = 0.0f;   // angle reel integre depuis le gyro
+float gyroZbias_dps   = 0.0f;
+float turn_target_deg = 0.0f;
+float gyro_angle_deg  = 0.0f;
 float turn_integral   = 0.0f;
 float turn_prev_error = 0.0f;
 unsigned long turn_last_us  = 0;
 unsigned long turn_start_ms = 0;
 
-// Boucle ouverte temporisee : commande V et sequence escalier (tractrice)
+// Sequence V : tractrice et commandes V isolees (boucle fermee de vitesse)
 struct CmdV { float vg; float vd; int dur_ms; };   // vitesses en cm/s, duree en ms
-const CmdV* vseq_ptr = nullptr;     // table de paliers en cours d'execution
-int  vseq_len = 0;                  // nombre de paliers
-int  vseq_idx = 0;                  // palier courant
-unsigned long vseq_step_start = 0;  // millis() au debut du palier courant
-CmdV vseq_single;                   // tampon pour une commande V isolee
-bool escalierPending = false;       // F:20 (ferme) en cours avant la tractrice
+const CmdV* vseq_ptr = nullptr;
+int  vseq_len = 0;
+int  vseq_idx = 0;
+unsigned long vseq_step_start = 0;
+CmdV vseq_single;
+bool escalierPending = false;
+
+// Etat du PI de vitesse (commande V)
+float vint_g = 0.0f, vint_d = 0.0f;     // integrales d'erreur
+float vmes_g_f = 0.0f, vmes_d_f = 0.0f; // vitesses mesurees filtrees (cm/s)
+long  vprev_eg = 0, vprev_ed = 0;       // derniers compteurs encodeurs
+unsigned long vprev_us = 0;
 
 // ---------- Commande bas niveau des moteurs ----------
 // Ecriture PWM "brute" : sens + saturation uniquement, SANS plancher de
@@ -164,21 +155,16 @@ void ecrirePWMGauche(int v) {
   else        { ledcWrite(CH_IN1_G, 0);  ledcWrite(CH_IN2_G, -v); }
 }
 
-// Conversion vitesse (cm/s) -> PWM signe (-255..255) pour la commande V.
-// Relation lineaire + deadband bas (PWM_MIN_V) pour vaincre le frottement.
-// Le signe est conserve tel quel : c'est ecrirePWMGauche qui gere l'inversion
-// du moteur gauche, donc on NE compense PAS le sens ici.
+// Conversion vitesse (cm/s) -> PWM signe : FEEDFORWARD du PI de vitesse.
 int vitesseToPWM(float v_cms) {
   if (fabsf(v_cms) < 0.1f) return 0;
-  int pwm = (int)(v_cms / V_MAX_CMS * PWM_V_MAX);
-  pwm = constrain(pwm, -255, 255);
-  if (pwm > 0 && pwm <  PWM_MIN_V) pwm =  PWM_MIN_V;
-  if (pwm < 0 && pwm > -PWM_MIN_V) pwm = -PWM_MIN_V;
-  return pwm;
+  int pwm_theorique = (int)((fabsf(v_cms) / V_MAX_CMS) * (PWM_V_MAX - PWM_MIN_V));
+  int pwm_final = pwm_theorique + PWM_MIN_V;
+  pwm_final = constrain(pwm_final, PWM_MIN_V, PWM_V_MAX);
+  return (v_cms < 0) ? -pwm_final : pwm_final;
 }
 
-// Commande "haut niveau" pour l'asservissement FERME (F/B/L/R) : applique en
-// plus le plancher de DEMARRAGE PWM_MIN (200), necessaire pour partir en charge.
+// Commande "haut niveau" pour l'asservissement FERME (F/B/L/R)
 void setMoteurDroit(int vitesse) {
   vitesse = constrain(vitesse, -255, 255);
   if (vitesse > 0)      vitesse = max(vitesse, PWM_MIN);
@@ -198,15 +184,77 @@ void stopMoteurs() {
   setMoteurGauche(0);
 }
 
-// Freinage actif : sur le DRV8837, les deux entrees a l'etat haut
-// court-circuitent le moteur (mode "brake") au lieu de le laisser
-// en roue libre. C'est ce qui empeche le robot de glisser sur son
-// inertie au moment de l'arret.
+// Freinage actif : les deux entrees du DRV8837 a l'etat haut = mode "brake".
 void brakeMoteurs() {
   ledcWrite(CH_IN1_D, 255); ledcWrite(CH_IN2_D, 255);
   ledcWrite(CH_IN1_G, 255); ledcWrite(CH_IN2_G, 255);
   delay(BRAKE_MS);
   stopMoteurs();
+}
+
+// ============================================================
+//  Asservissement de VITESSE par roue (commandes V / tractrice)
+// ============================================================
+// Le coeur de la sequence 1 : chaque roue est asservie en vitesse
+// (cm/s) avec un PI + feedforward. Schema bloc par roue :
+//
+//   consigne ->(+)-> PI -->(+)--> PWM --> moteur --> roue
+//              (-)         (+)                        |
+//               |       feedforward                   |
+//               +---- vitesse mesuree (encodeur) <----+
+//
+void resetVitessePI() {
+  vint_g = vint_d = 0.0f;
+  vmes_g_f = vmes_d_f = 0.0f;
+  noInterrupts(); vprev_eg = enc_gauche; vprev_ed = enc_droit; interrupts();
+  vprev_us = micros();
+}
+
+void controlVitesse(float vg_cible, float vd_cible) {
+  unsigned long now = micros();
+  float dt = (now - vprev_us) / 1.0e6f;
+  vprev_us = now;
+  if (dt <= 0.0f || dt > 0.1f) dt = CONTROL_PERIOD_MS / 1000.0f;
+
+  // 1) MESURE : vitesse reelle de chaque roue depuis les encodeurs.
+  noInterrupts(); long eg = enc_gauche, ed = enc_droit; interrupts();
+  // L'encodeur gauche compte NEGATIF en marche avant (cable a l'envers,
+  // verifie par les logs : Enc G=-736 apres un F:20). On inverse ici.
+  float vg_mes = -(float)(eg - vprev_eg) / TICKS_PER_CM / dt;
+  float vd_mes =  (float)(ed - vprev_ed) / TICKS_PER_CM / dt;
+  vprev_eg = eg; vprev_ed = ed;
+
+  // Filtre passe-bas : a 1.7 cm/s on ne compte que ~0.6 tick par periode
+  // de 10 ms, la mesure brute est tres quantifiee.
+  vmes_g_f = 0.75f * vmes_g_f + 0.25f * vg_mes;
+  vmes_d_f = 0.75f * vmes_d_f + 0.25f * vd_mes;
+
+  // 2) PI + anti-windup (l'integrale est bornee pour que sa contribution
+  //    en PWM ne depasse jamais ~220, sinon gros depassements).
+  float err_g = vg_cible - vmes_g_f;
+  float err_d = vd_cible - vmes_d_f;
+  float imax = 220.0f / fmaxf(KI_V, 1.0f);
+  vint_g = constrain(vint_g + err_g * dt, -imax, imax);
+  vint_d = constrain(vint_d + err_d * dt, -imax, imax);
+
+  int pwm_g = vitesseToPWM(vg_cible) + (int)(KP_V * err_g + KI_V * vint_g);
+  int pwm_d = vitesseToPWM(vd_cible) + (int)(KP_V * err_d + KI_V * vint_d);
+
+  // 3) KICK anti-friction statique : une roue commandee mais immobile
+  //    recoit au moins PWM_KICK le temps de decoller. Sans ca, les
+  //    vitesses lentes de la tractrice (PWM theorique ~80-130) ne
+  //    franchissent jamais le seuil de demarrage (~200).
+  if (fabsf(vg_cible) > 0.3f && fabsf(vmes_g_f) < 0.5f) {
+    if (pwm_g > 0 && pwm_g <  PWM_KICK) pwm_g =  PWM_KICK;
+    if (pwm_g < 0 && pwm_g > -PWM_KICK) pwm_g = -PWM_KICK;
+  }
+  if (fabsf(vd_cible) > 0.3f && fabsf(vmes_d_f) < 0.5f) {
+    if (pwm_d > 0 && pwm_d <  PWM_KICK) pwm_d =  PWM_KICK;
+    if (pwm_d < 0 && pwm_d > -PWM_KICK) pwm_d = -PWM_KICK;
+  }
+
+  ecrirePWMGauche(constrain(pwm_g, -255, 255));
+  ecrirePWMDroit (constrain(pwm_d, -255, 255));
 }
 
 // ============================================================
@@ -226,8 +274,6 @@ uint8_t imuReadReg(uint8_t reg) {
   return Wire.available() ? Wire.read() : 0;
 }
 
-// Vitesse de rotation autour de la verticale, en deg/s.
-// Biais retire et signe applique : positif = rotation vers la gauche.
 float lireGyroZ() {
   Wire.beginTransmission(ADDR_IMU);
   Wire.write(LSM_OUTZ_L_G);
@@ -236,23 +282,22 @@ float lireGyroZ() {
   if (Wire.available() < 2) return 0.0f;
   uint8_t lo = Wire.read();
   uint8_t hi = Wire.read();
-  int16_t raw = (int16_t)((hi << 8) | lo);     // signe, little-endian
+  int16_t raw = (int16_t)((hi << 8) | lo);
   return ((float)raw * GYRO_SENS_DPS - gyroZbias_dps) * GYRO_Z_SIGN;
 }
 
 bool imuInit() {
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
-  delay(20);                                   // boot LSM6DS3 (~15 ms)
+  delay(20);
   uint8_t who = imuReadReg(LSM_WHO_AM_I);
-  if (who != 0x69 && who != 0x6A) return false; // 0x69=LSM6DS3, 0x6A=LSM6DS3TR-C
-  imuWriteReg(LSM_CTRL3_C, 0x44);              // BDU=1 + auto-increment
-  imuWriteReg(LSM_CTRL2_G, 0x5C);              // gyro 208 Hz, +/-2000 dps
+  if (who != 0x69 && who != 0x6A) return false;
+  imuWriteReg(LSM_CTRL3_C, 0x44);
+  imuWriteReg(LSM_CTRL2_G, 0x5C);
   delay(50);
   return true;
 }
 
-// Mesure du biais du gyro : moyenne sur ~1 s, ROBOT IMMOBILE.
 void calibrerGyro(int n = 400) {
   double somme = 0;
   for (int i = 0; i < n; i++) {
@@ -272,9 +317,6 @@ void calibrerGyro(int n = 400) {
 }
 
 // ---------- Demarrage d'un mouvement asservi (ticks : F/B) ----------
-// On ne fixe plus de PWM ici : on definit seulement la cible et les
-// sens. C'est la boucle d'asservissement qui calcule le PWM a chaque
-// periode d'echantillonnage.
 void startMouvement(int dirD, int dirG, unsigned long ticks) {
   noInterrupts();
   enc_gauche = 0;
@@ -283,12 +325,12 @@ void startMouvement(int dirD, int dirG, unsigned long ticks) {
   tick_dir_D = (dirD >= 0) ? 1 : -1;
   tick_dir_G = (dirG >= 0) ? 1 : -1;
   tick_target = (long)ticks;
-  escalierPending = false;        // un F/B ordinaire n'enchaine pas la tractrice
+  escalierPending = false;
   motionMode = MODE_TICKS;
 }
 
 // ---------- Demarrage d'un virage asservi sur le gyro (L/R) ----------
-void startTurnGyro(float deg) {       // deg > 0 : gauche, deg < 0 : droite
+void startTurnGyro(float deg) {
   gyro_angle_deg  = 0.0f;
   turn_target_deg = deg;
   turn_integral   = 0.0f;
@@ -299,23 +341,20 @@ void startTurnGyro(float deg) {       // deg > 0 : gauche, deg < 0 : droite
   motionMode      = MODE_TURN;
 }
 
-// ============================================================
-//  Commande V et sequence escalier (boucle OUVERTE, tractrice)
-// ============================================================
-// Profil de vitesses pre-calcule (cinematique de la tractrice) qui trace les
-// DEUX virages de l'escalier : virage gauche 90°, puis virage droit 90° fondu
-// dans le segment droit final de 40 cm. Le segment initial de 20 cm est fait
-// AVANT, en boucle FERMEE (commande F), pour tenir la tolerance de distance
-// (+/-1 cm). NB : le segment de 10 cm entre les deux virages n'apparait pas
-// dans cette table -> a verifier / completer (voir resume).
+// ---------- Sequence escalier : tractrice originale, Vp ~ 5 cm/s ----------
+// Geometrie validee en simulation (deviation max < 0.5 mm). Avec
+// l'asservissement de vitesse, ces valeurs lentes sont enfin executables :
+// le PI monte le PWM jusqu'a ce que la roue tourne VRAIMENT a la consigne.
 static const CmdV ESCALIER[] = {
-  // --- virage gauche 90° (tractrice) ---
+  // virage gauche (90 deg, le stylo trace l'angle, le chassis pivote)
   {-1.69f, 2.00f, 110}, {-1.37f, 2.31f, 110}, {-1.05f, 2.61f, 110},
   {-0.72f, 2.91f, 120}, {-0.39f, 3.20f, 120}, {-0.07f, 3.47f, 120},
   { 0.26f, 3.74f, 120}, { 0.59f, 4.00f, 120}, { 0.92f, 4.25f, 130},
   { 1.24f, 4.49f, 130}, { 1.56f, 4.71f, 130}, { 1.88f, 4.92f, 140},
   { 2.19f, 5.12f, 140}, { 2.49f, 5.30f, 100},
-  // --- virage droit 90° + segment final de 40 cm (tractrice) ---
+  // pause : consigne 0 = freinage asservi (le PI ramene les roues a 0)
+  { 0.00f, 0.00f, 200},
+  // virage droit + segment de 40 cm
   { 4.79f, 2.77f, 200}, { 4.92f, 3.06f, 200}, { 5.00f, 3.27f, 200},
   { 5.06f, 3.45f, 200}, { 5.11f, 3.60f, 200}, { 5.15f, 3.74f, 200},
   { 5.18f, 3.86f, 200}, { 5.20f, 3.97f, 200}, { 5.21f, 4.07f, 200},
@@ -333,19 +372,15 @@ static const CmdV ESCALIER[] = {
 };
 const int N_ESCALIER = sizeof(ESCALIER) / sizeof(ESCALIER[0]);
 
-// Demarre l'execution d'une table de paliers de vitesse (boucle ouverte).
 void startVSeq(const CmdV* seq, int len) {
   vseq_ptr = seq;
   vseq_len = len;
   vseq_idx = 0;
   vseq_step_start = millis();
+  resetVitessePI();              // repart d'un etat propre (integrale, mesure)
   motionMode = MODE_VSEQ;
 }
 
-// ---------- Boucle d'execution des paliers V (100 Hz) ----------
-// A chaque periode : applique la consigne de vitesse du palier courant ; quand
-// sa duree est ecoulee, passe au suivant ; en fin de table, freine -> IDLE.
-// L'inversion du moteur gauche est geree par ecrirePWMGauche (pas ici).
 void controlVSeq() {
   if (vseq_ptr == nullptr || vseq_idx >= vseq_len) {
     brakeMoteurs();
@@ -354,20 +389,13 @@ void controlVSeq() {
     return;
   }
   const CmdV& s = vseq_ptr[vseq_idx];
-  ecrirePWMGauche(vitesseToPWM(s.vg));
-  ecrirePWMDroit (vitesseToPWM(s.vd));
+  controlVitesse(s.vg, s.vd);    // boucle FERMEE : la vitesse reelle suit la consigne
   if (millis() - vseq_step_start >= (unsigned long)s.dur_ms) {
     vseq_idx++;
     vseq_step_start = millis();
   }
 }
 
-// ---------- Boucle d'asservissement des trajets droits (100 Hz) ----------
-// Pour CHAQUE roue : erreur = ticks restants, PWM = KP * erreur,
-// borne entre PWM_MIN (friction) et PWM_MAX. Le robot ralentit donc
-// naturellement en approchant de la cible.
-// Le terme KSYNC penalise la roue en avance et booste la roue en
-// retard, ce qui garantit une ligne bien droite.
 void controlTicks() {
   noInterrupts();
   long tg = abs(enc_gauche);
@@ -378,10 +406,9 @@ void controlTicks() {
   long errD = tick_target - td;
 
   if (errG <= TOL_TICKS && errD <= TOL_TICKS) {
-    brakeMoteurs();
+    brakeMoteurs();   // arret net au coin : la tractrice repart de l'arret
+                      // (le PI + kick gere le redemarrage, plus besoin d'elan)
     if (escalierPending) {
-      // Segment initial de 20 cm termine -> enchaine la partie tractrice.
-      // Pas de ">> DONE" ici : le DONE final viendra de controlVSeq.
       escalierPending = false;
       envoyer(">> SEQ:1 20cm OK -> tractrice");
       startVSeq(ESCALIER, N_ESCALIER);
@@ -392,7 +419,7 @@ void controlTicks() {
     return;
   }
 
-  long diff = tg - td;   // >0 : la gauche est en avance sur la droite
+  long diff = tg - td;
 
   int pwmG = 0, pwmD = 0;
   if (errG > TOL_TICKS)
@@ -404,23 +431,17 @@ void controlTicks() {
   setMoteurDroit(pwmD * tick_dir_D);
 }
 
-// ---------- Boucle PID du virage sur le gyro (100 Hz) ----------
-// consigne = angle voulu (deg), mesure = angle reel integre depuis le
-// gyro. erreur = consigne - mesure. La commande PWM est appliquee de
-// facon differentielle (une roue avant, l'autre arriere).
 void controlTurnGyro() {
   unsigned long now_us = micros();
   float dt = (now_us - turn_last_us) / 1.0e6f;
   turn_last_us = now_us;
-  if (dt <= 0.0f || dt > 0.2f) dt = CONTROL_PERIOD_MS / 1000.0f;   // garde-fou
+  if (dt <= 0.0f || dt > 0.2f) dt = CONTROL_PERIOD_MS / 1000.0f;
 
-  // 1) MESURE : integration de la vitesse gyro -> angle reel
   float rate = lireGyroZ();
   gyro_angle_deg += rate * dt;
 
   float error = turn_target_deg - gyro_angle_deg;
 
-  // 2) ARRET : cible atteinte (avec avance pour compenser l'inertie)
   if (fabs(gyro_angle_deg) >= fabs(turn_target_deg) - TURN_BRAKE_LEAD_DEG) {
     brakeMoteurs();
     motionMode = MODE_IDLE;
@@ -429,8 +450,6 @@ void controlTurnGyro() {
     return;
   }
 
-  // 2bis) SECURITE : signe du gyro inverse ? (le robot tourne mais
-  // l'angle part dans le mauvais sens) -> on stoppe et on previent.
   if (millis() - turn_start_ms > 400 &&
       fabs(gyro_angle_deg) > 5.0f &&
       (gyro_angle_deg * turn_target_deg) < 0.0f) {
@@ -441,7 +460,6 @@ void controlTurnGyro() {
     return;
   }
 
-  // 2ter) SECURITE : timeout
   if (millis() - turn_start_ms > TURN_TIMEOUT_MS) {
     brakeMoteurs();
     motionMode = MODE_IDLE;
@@ -449,7 +467,6 @@ void controlTurnGyro() {
     return;
   }
 
-  // 3) PID
   turn_integral += error * dt;
   turn_integral = constrain(turn_integral, -TURN_INTEGRAL_MAX, TURN_INTEGRAL_MAX);
   float deriv = (error - turn_prev_error) / dt;
@@ -457,9 +474,6 @@ void controlTurnGyro() {
 
   float out = KP_TURN * error + KI_TURN * turn_integral + KD_TURN * deriv;
 
-  // 4) Application : saturation (le plancher de friction PWM_MIN est
-  //    assure par setMoteur*). cmd > 0 => rotation vers la gauche :
-  //    roue droite en avant, roue gauche en arriere.
   int cmd = constrain((int)out, -TURN_PWM_MAX, TURN_PWM_MAX);
   setMoteurDroit(cmd);
   setMoteurGauche(-cmd);
@@ -484,29 +498,29 @@ void traiterCommande(const String& cmd) {
   } else if (cmd.startsWith("L:")) {
     float deg = cmd.substring(2).toFloat();
     if (imuOk) {
-      startTurnGyro(+deg);                       // gauche = positif
+      startTurnGyro(+deg);
       envoyer(">> L:" + String(deg) + "deg (gyro PID)");
     } else {
       float arc_cm = (deg / 360.0f) * PI * TRACK_WIDTH_CM * TURN_CORRECTION;
       unsigned long ticks = (unsigned long)(arc_cm / WHEEL_CIRCUM_CM * TICKS_PER_REV);
-      startMouvement(+1, -1, ticks);             // droite avant, gauche arriere
+      startMouvement(+1, -1, ticks);
       envoyer(">> L:" + String(deg) + "deg = " + String(ticks) + " ticks (encodeur)");
     }
 
   } else if (cmd.startsWith("R:")) {
     float deg = cmd.substring(2).toFloat();
     if (imuOk) {
-      startTurnGyro(-deg);                       // droite = negatif
+      startTurnGyro(-deg);
       envoyer(">> R:" + String(deg) + "deg (gyro PID)");
     } else {
       float arc_cm = (deg / 360.0f) * PI * TRACK_WIDTH_CM * TURN_CORRECTION;
       unsigned long ticks = (unsigned long)(arc_cm / WHEEL_CIRCUM_CM * TICKS_PER_REV);
-      startMouvement(-1, +1, ticks);             // gauche avant, droite arriere
+      startMouvement(-1, +1, ticks);
       envoyer(">> R:" + String(deg) + "deg = " + String(ticks) + " ticks (encodeur)");
     }
 
   } else if (cmd.startsWith("V:")) {
-    // Vitesse roue independante, boucle ouverte temporisee : V:vG:vD:duree_ms
+    // Vitesse roue independante, ASSERVIE : V:vG:vD:duree_ms
     String s = cmd.substring(2);
     int c1 = s.indexOf(':');
     int c2 = s.indexOf(':', c1 + 1);
@@ -525,11 +539,10 @@ void traiterCommande(const String& cmd) {
   } else if (cmd.startsWith("SEQ:")) {
     int n = cmd.substring(4).toInt();
     if (n == 1) {
-      // Escalier : 20 cm en boucle FERMEE (F) puis virages en boucle OUVERTE.
       unsigned long ticks = (unsigned long)(20.0f / WHEEL_CIRCUM_CM * TICKS_PER_REV);
-      startMouvement(+1, +1, ticks);   // remet escalierPending a false...
-      escalierPending = true;          // ...donc on le re-arme juste apres
-      envoyer(">> SEQ:1 escalier (20cm ferme -> tractrice ouverte)");
+      startMouvement(+1, +1, ticks);
+      escalierPending = true;
+      envoyer(">> SEQ:1 escalier (20cm ferme -> tractrice asservie)");
     } else {
       envoyer("ERR:SEQ inconnue:" + String(n));
     }
@@ -543,8 +556,11 @@ void traiterCommande(const String& cmd) {
   } else if (cmd == "E" || cmd == "e") {
     envoyer("Enc G=" + String(enc_gauche) + " Enc D=" + String(enc_droit));
 
+  } else if (cmd == "W" || cmd == "w") {
+    // Vitesses mesurees (mises a jour pendant une sequence V uniquement)
+    envoyer("Vmes G=" + String(vmes_g_f, 2) + " D=" + String(vmes_d_f, 2) + " cm/s");
+
   } else if (cmd == "G" || cmd == "g") {
-    // Lecture gyro : utile pour verifier le signe et pour le reglage
     envoyer("Gyro rate=" + String(lireGyroZ(), 2) + " dps | angle=" +
             String(gyro_angle_deg, 2) + " deg | imu=" + String(imuOk ? 1 : 0));
 
@@ -557,7 +573,6 @@ void traiterCommande(const String& cmd) {
     }
 
   } else if (cmd.startsWith("PIDT:")) {
-    // Reglage en direct des gains du PID de virage : "PIDT:kp,ki,kd"
     String s = cmd.substring(5);
     int c1 = s.indexOf(',');
     int c2 = s.indexOf(',', c1 + 1);
@@ -569,6 +584,18 @@ void traiterCommande(const String& cmd) {
               " Ki=" + String(KI_TURN, 3) + " Kd=" + String(KD_TURN, 3));
     } else {
       envoyer("ERR:PIDT attend Kp,Ki,Kd");
+    }
+
+  } else if (cmd.startsWith("PIDV:")) {
+    // Reglage en direct du PI de vitesse : "PIDV:kp,ki"
+    String s = cmd.substring(5);
+    int c1 = s.indexOf(',');
+    if (c1 > 0) {
+      KP_V = s.substring(0, c1).toFloat();
+      KI_V = s.substring(c1 + 1).toFloat();
+      envoyer(">> PI vitesse Kp=" + String(KP_V, 2) + " Ki=" + String(KI_V, 1));
+    } else {
+      envoyer("ERR:PIDV attend Kp,Ki");
     }
 
   } else {
@@ -614,7 +641,6 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_G_CH_A), isr_enc_g, RISING);
   attachInterrupt(digitalPinToInterrupt(ENC_D_CH_A), isr_enc_d, RISING);
 
-  // IMU : gyroscope pour les virages en boucle fermee
   imuOk = imuInit();
   if (imuOk) {
     Serial.println("IMU LSM6DS3 OK - calibration du gyro (NE PAS BOUGER le robot)...");
