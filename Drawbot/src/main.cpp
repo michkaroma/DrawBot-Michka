@@ -372,6 +372,43 @@ static const CmdV ESCALIER[] = {
 };
 const int N_ESCALIER = sizeof(ESCALIER) / sizeof(ESCALIER[0]);
 
+// ---------- Séquence dynamique : Cercle (Cinématique inverse) ----------
+#define N_CERCLE 40
+CmdV CERCLE_BUFFER[N_CERCLE]; // Buffer global pour stocker la séquence générée
+
+void genererCercle(float Rc) {
+  float d = 13.0f;           // Offset du stylo d (cm)
+  float e = TRACK_WIDTH_CM;  // Entraxe des roues (déjà défini à 8.5f)
+  float T = 10.0f;           // Temps total pour faire le cercle (secondes)
+  float dt = T / (float)N_CERCLE;
+  
+  float theta = PI / 2.0f;   // Le robot commence orienté à 90° (vers le haut)
+
+  for(int i = 0; i < N_CERCLE; i++) {
+    float t = i * dt;
+    
+    // 1. Vitesse du stylo requise (vitesses tangentielles)
+    float vpx = -(2.0f * PI * Rc / T) * sin(2.0f * PI * t / T);
+    float vpy =  (2.0f * PI * Rc / T) * cos(2.0f * PI * t / T);
+
+    // 2. Cinématique inverse (reculer/avancer pour compenser l'offset)
+    float v = vpx * cos(theta) + vpy * sin(theta);
+    float w = (-vpx * sin(theta) + vpy * cos(theta)) / d;
+
+    // 3. Calcul des vitesses de roues
+    float wg = v - (e * w) / 2.0f;
+    float wd = v + (e * w) / 2.0f;
+
+    // 4. Enregistrement dans le buffer
+    CERCLE_BUFFER[i].vg = wg;
+    CERCLE_BUFFER[i].vd = wd;
+    CERCLE_BUFFER[i].dur_ms = (int)(dt * 1000.0f);
+
+    // Mise à jour de l'orientation virtuelle
+    theta += w * dt;
+  }
+}
+
 void startVSeq(const CmdV* seq, int len) {
   vseq_ptr = seq;
   vseq_len = len;
@@ -537,12 +574,33 @@ void traiterCommande(const String& cmd) {
     }
 
   } else if (cmd.startsWith("SEQ:")) {
-    int n = cmd.substring(4).toInt();
+    // Extraction des paramètres. Format attendu : SEQ:num ou SEQ:num:rayon
+    String s = cmd.substring(4);
+    int idx = s.indexOf(':');
+    int n = 0;
+    float rayon = 2.0f; // Rayon par défaut si non spécifié
+    
+    if (idx > 0) {
+      n = s.substring(0, idx).toInt();
+      rayon = s.substring(idx + 1).toFloat();
+    } else {
+      n = s.toInt();
+    }
+
     if (n == 1) {
+      // Séquence 1 : Escalier original (précédé d'un F:20)
       unsigned long ticks = (unsigned long)(20.0f / WHEEL_CIRCUM_CM * TICKS_PER_REV);
       startMouvement(+1, +1, ticks);
       escalierPending = true;
       envoyer(">> SEQ:1 escalier (20cm ferme -> tractrice asservie)");
+      
+    } else if (n == 2) {
+      // Séquence 2 : Cercle dynamique
+      genererCercle(rayon);
+      escalierPending = false; // Le cercle se lance tout de suite
+      startVSeq(CERCLE_BUFFER, N_CERCLE);
+      envoyer(">> SEQ:2 cercle dynamique (Rayon=" + String(rayon) + "cm)");
+      
     } else {
       envoyer("ERR:SEQ inconnue:" + String(n));
     }

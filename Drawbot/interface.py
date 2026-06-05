@@ -5,6 +5,7 @@ from tkinter import ttk, messagebox
 
 TCP_PORT = 8266
 SEQ1_TOTAL_TIMEOUT_S = 30   # duree max de toute la sequence escalier (cote ESP32)
+SEQ2_TOTAL_TIMEOUT_S = 20   # duree max pour le cercle (T=10s + marge)
 
 
 class DrawbotGUI:
@@ -69,9 +70,24 @@ class DrawbotGUI:
         seq_frame = ttk.LabelFrame(self.root, text="Séquences")
         seq_frame.grid(row=1, column=1, sticky="nsew", **pad)
 
+        # Bouton Séquence 1
         self.seq1_btn = ttk.Button(seq_frame, text="Séq. 1 — Escalier", width=22,
                                    command=self._seq_escalier)
-        self.seq1_btn.grid(row=0, column=0, pady=6, padx=8)
+        self.seq1_btn.grid(row=0, column=0, pady=(6, 2), padx=8, sticky="ew")
+
+        # Sous-cadre pour Séquence 2 (Cercle avec paramètre rayon)
+        seq2_frame = ttk.Frame(seq_frame)
+        seq2_frame.grid(row=1, column=0, pady=(2, 6), padx=8, sticky="ew")
+        
+        self.seq2_btn = ttk.Button(seq2_frame, text="Séq. 2 — Cercle", width=13,
+                                   command=self._seq_cercle)
+        self.seq2_btn.pack(side="left", padx=(0, 4))
+        
+        ttk.Label(seq2_frame, text="R=").pack(side="left")
+        self.rayon_var = tk.DoubleVar(value=2.0)
+        ttk.Spinbox(seq2_frame, from_=0.5, to=20.0, textvariable=self.rayon_var,
+                    width=4, format="%.1f", increment=0.5).pack(side="left")
+        ttk.Label(seq2_frame, text="cm").pack(side="left")
 
         enc_frame = ttk.LabelFrame(self.root, text="Encodeurs")
         enc_frame.grid(row=2, column=0, sticky="ew", **pad)
@@ -263,10 +279,6 @@ class DrawbotGUI:
 
     # ------------------------------------------------------------------
     # Sequence n°1 : l'escalier
-    # La sequence est desormais executee cote ESP32 (commande "SEQ:1") :
-    #   - segment 1 (20 cm) en boucle FERMEE (asservissement F),
-    #   - les deux virages en boucle OUVERTE (profil tractrice, table CmdV).
-    # On envoie donc une seule commande et on attend l'unique ">> DONE" final.
     # ------------------------------------------------------------------
     def _seq_escalier(self):
         if self._seq_running:
@@ -293,6 +305,43 @@ class DrawbotGUI:
                     self.root.after(0, self._log, "[SEQ1] Interrompue.")
                     return
                 self.root.after(0, self._log, "[SEQ1] Terminé.")
+            finally:
+                self._seq_running = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Sequence n°2 : le cercle (Généré dynamiquement par l'ESP32)
+    # ------------------------------------------------------------------
+    def _seq_cercle(self):
+        if self._seq_running:
+            self._log("[SEQ2] Déjà en cours.")
+            return
+        self._seq_running = True
+        self._seq_abort = False
+        
+        rayon = self.rayon_var.get()
+
+        def run():
+            try:
+                if not self.connected:
+                    self.root.after(0, self._log, "[SEQ2] Non connecté.")
+                    return
+                self.root.after(0, self._log, f"[SEQ2] Cercle dynamique (Rayon={rayon:.1f} cm)")
+                self._done_event.clear()
+                
+                # Envoi de la commande avec le rayon en argument
+                self._send_raw_cmd(f"SEQ:2:{rayon:.1f}")
+                
+                # Le cercle met environ 10 secondes : on laisse une marge.
+                if not self._done_event.wait(timeout=SEQ2_TOTAL_TIMEOUT_S):
+                    self.root.after(0, self._log, "[SEQ2] Timeout — abandon.")
+                    self._send_raw_cmd("S")
+                    return
+                if self._seq_abort:
+                    self.root.after(0, self._log, "[SEQ2] Interrompue.")
+                    return
+                self.root.after(0, self._log, "[SEQ2] Terminé.")
             finally:
                 self._seq_running = False
 
