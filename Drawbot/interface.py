@@ -1,10 +1,10 @@
 import socket
 import threading
-import time
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 TCP_PORT = 8266
+SEQ1_TOTAL_TIMEOUT_S = 30   # duree max de toute la sequence escalier (cote ESP32)
 
 
 class DrawbotGUI:
@@ -16,9 +16,18 @@ class DrawbotGUI:
         self.sock = None
         self.connected = False
 
+        # Synchronisation de la sequence : l'evenement est declenche
+        # quand l'ESP32 envoie ">> DONE" (fin d'un mouvement asservi).
+        self._done_event = threading.Event()
+        self._seq_running = False
+        self._seq_abort = False
+
         self._build_ui()
         self._poll_encoders()
 
+    # ------------------------------------------------------------------
+    # Construction de l'interface
+    # ------------------------------------------------------------------
     def _build_ui(self):
         pad = {"padx": 10, "pady": 6}
 
@@ -60,9 +69,9 @@ class DrawbotGUI:
         seq_frame = ttk.LabelFrame(self.root, text="Séquences")
         seq_frame.grid(row=1, column=1, sticky="nsew", **pad)
 
-        ttk.Button(seq_frame, text="Séq. 1 — Escalier", width=22,
-                   command=self._seq_escalier).grid(row=0, column=0, pady=6, padx=8)
-
+        self.seq1_btn = ttk.Button(seq_frame, text="Séq. 1 — Escalier", width=22,
+                                   command=self._seq_escalier)
+        self.seq1_btn.grid(row=0, column=0, pady=6, padx=8)
 
         enc_frame = ttk.LabelFrame(self.root, text="Encodeurs")
         enc_frame.grid(row=2, column=0, sticky="ew", **pad)
@@ -77,20 +86,56 @@ class DrawbotGUI:
 
         ttk.Button(enc_frame, text="Lire", command=self._read_enc, width=6).grid(row=0, column=4, padx=6)
 
+        # --- Réglage du PID de virage (gyro), modifiable en direct ---
+        tune_frame = ttk.LabelFrame(self.root, text="Réglage virage (gyro / PID)")
+        tune_frame.grid(row=2, column=1, sticky="nsew", **pad)
+
+        self.kp_var = tk.DoubleVar(value=4.0)
+        self.ki_var = tk.DoubleVar(value=0.10)
+        self.kd_var = tk.DoubleVar(value=0.20)
+
+        ttk.Label(tune_frame, text="Kp").grid(row=0, column=0, padx=2, pady=2)
+        ttk.Entry(tune_frame, textvariable=self.kp_var, width=6).grid(row=0, column=1, padx=2)
+        ttk.Label(tune_frame, text="Ki").grid(row=0, column=2, padx=2)
+        ttk.Entry(tune_frame, textvariable=self.ki_var, width=6).grid(row=0, column=3, padx=2)
+        ttk.Label(tune_frame, text="Kd").grid(row=0, column=4, padx=2)
+        ttk.Entry(tune_frame, textvariable=self.kd_var, width=6).grid(row=0, column=5, padx=2)
+
+        ttk.Button(tune_frame, text="Appliquer PID", command=self._apply_pid).grid(
+            row=1, column=0, columnspan=2, pady=4, padx=2, sticky="ew")
+        ttk.Button(tune_frame, text="Calibrer gyro", command=lambda: self._send("CAL")).grid(
+            row=1, column=2, columnspan=2, pady=4, padx=2, sticky="ew")
+        ttk.Button(tune_frame, text="Lire gyro", command=lambda: self._send("G")).grid(
+            row=1, column=4, columnspan=2, pady=4, padx=2, sticky="ew")
+
+        ttk.Button(tune_frame, text="Test 90° ←", command=lambda: self._send("L:90.0")).grid(
+            row=2, column=0, columnspan=3, pady=(0, 4), padx=2, sticky="ew")
+        ttk.Button(tune_frame, text="Test 90° →", command=lambda: self._send("R:90.0")).grid(
+            row=2, column=3, columnspan=3, pady=(0, 4), padx=2, sticky="ew")
+
         log_frame = ttk.LabelFrame(self.root, text="Console")
-        log_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 6))
+        log_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=(0, 6))
         log_frame.grid_columnconfigure(0, weight=1)
 
         self.log = tk.Text(log_frame, height=9, state="disabled",
                            font=("Courier", 10), wrap="word")
-        self.log.grid(row=0, column=0, sticky="ew", padx=4, pady=4)
+        self.log.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
 
         scroll = ttk.Scrollbar(log_frame, command=self.log.yview)
-        scroll.grid(row=0, column=1, sticky="ns")
+        scroll.grid(row=0, column=2, sticky="ns")
         self.log["yscrollcommand"] = scroll.set
 
+        # Champ de commande brute (utile pour les tests / la demo)
+        self.raw_var = tk.StringVar()
+        raw_entry = ttk.Entry(log_frame, textvariable=self.raw_var)
+        raw_entry.grid(row=1, column=0, sticky="ew", padx=4, pady=(0, 4))
+        raw_entry.bind("<Return>", lambda e: self._send_raw())
+        ttk.Button(log_frame, text="Envoyer", command=self._send_raw,
+                   width=8).grid(row=1, column=1, padx=4, pady=(0, 4))
 
-
+    # ------------------------------------------------------------------
+    # Connexion
+    # ------------------------------------------------------------------
     def _toggle_connection(self):
         if self.connected:
             self._disconnect()
@@ -116,6 +161,8 @@ class DrawbotGUI:
 
     def _disconnect(self):
         self.connected = False
+        self._seq_abort = True
+        self._done_event.set()      # libere une eventuelle sequence en attente
         try:
             self._send_raw_cmd("S")
             self.sock.close()
@@ -127,6 +174,9 @@ class DrawbotGUI:
         self._set_controls_state("disabled")
         self._log("[INFO] Déconnecté.")
 
+    # ------------------------------------------------------------------
+    # Reception
+    # ------------------------------------------------------------------
     def _rx_loop(self):
         buf = ""
         while self.connected:
@@ -143,12 +193,17 @@ class DrawbotGUI:
             except socket.timeout:
                 continue
             except Exception as e:
-                self.root.after(0, self._log, f"[RX ERR] {e}")  # ← ajoute ça
+                self.root.after(0, self._log, f"[RX ERR] {e}")
                 break
         self.root.after(0, self._on_disconnect)
 
     def _handle_rx(self, line):
         self._log(f"ESP32 : {line}")
+
+        # Fin d'un mouvement asservi : debloque la sequence en cours
+        if ">> DONE" in line:
+            self._done_event.set()
+
         # Parse encodeurs "Enc G=xxx Enc D=xxx"
         if "Enc G=" in line and "Enc D=" in line:
             try:
@@ -163,7 +218,9 @@ class DrawbotGUI:
         if self.connected:
             self._disconnect()
 
-
+    # ------------------------------------------------------------------
+    # Envoi
+    # ------------------------------------------------------------------
     def _send_raw_cmd(self, cmd: str):
         if not self.connected or self.sock is None:
             return
@@ -181,6 +238,9 @@ class DrawbotGUI:
         self._send(f"{direction}:{val:.1f}")
 
     def _stop(self):
+        # Interrompt aussi une eventuelle sequence en cours
+        self._seq_abort = True
+        self._done_event.set()
         self._send("S")
 
     def _read_enc(self):
@@ -191,33 +251,56 @@ class DrawbotGUI:
             self._send_raw_cmd("E")
         self.root.after(2000, self._poll_encoders)
 
+    def _apply_pid(self):
+        # Envoie les gains PID du virage a l'ESP32 (sans recompiler)
+        self._send(f"PIDT:{self.kp_var.get():.3f},{self.ki_var.get():.3f},{self.kd_var.get():.3f}")
+
     def _send_raw(self):
         cmd = self.raw_var.get().strip()
         if cmd:
             self._send(cmd)
             self.raw_var.set("")
 
-
+    # ------------------------------------------------------------------
+    # Sequence n°1 : l'escalier
+    # La sequence est desormais executee cote ESP32 (commande "SEQ:1") :
+    #   - segment 1 (20 cm) en boucle FERMEE (asservissement F),
+    #   - les deux virages en boucle OUVERTE (profil tractrice, table CmdV).
+    # On envoie donc une seule commande et on attend l'unique ">> DONE" final.
+    # ------------------------------------------------------------------
     def _seq_escalier(self):
+        if self._seq_running:
+            self._log("[SEQ1] Déjà en cours.")
+            return
+        self._seq_running = True
+        self._seq_abort = False
+
         def run():
-            steps = [
-                ("F:20.0", "Avance 20 cm"),
-                ("L:90.0", "Tourne 90° gauche"),
-                ("F:10.0", "Avance 10 cm"),
-                ("R:90.0", "Tourne 90° droite"),
-                ("F:40.0", "Avance 40 cm"),
-            ]
-            for cmd, label in steps:
+            try:
                 if not self.connected:
-                    break
-                self.root.after(0, self._log, f"[SEQ1] {label}")
-                self._send_raw_cmd(cmd)
-                time.sleep(3.5)
-            self.root.after(0, self._log, "[SEQ1] Terminé.")
+                    self.root.after(0, self._log, "[SEQ1] Non connecté.")
+                    return
+                self.root.after(0, self._log,
+                                "[SEQ1] Escalier (firmware : 20cm fermé → tractrice)")
+                self._done_event.clear()
+                self._send_raw_cmd("SEQ:1")
+                # La sequence complete dure ~15 s : on laisse une marge.
+                if not self._done_event.wait(timeout=SEQ1_TOTAL_TIMEOUT_S):
+                    self.root.after(0, self._log, "[SEQ1] Timeout — abandon.")
+                    self._send_raw_cmd("S")
+                    return
+                if self._seq_abort:
+                    self.root.after(0, self._log, "[SEQ1] Interrompue.")
+                    return
+                self.root.after(0, self._log, "[SEQ1] Terminé.")
+            finally:
+                self._seq_running = False
 
         threading.Thread(target=run, daemon=True).start()
 
-    
+    # ------------------------------------------------------------------
+    # Divers
+    # ------------------------------------------------------------------
     def _log(self, msg: str):
         self.log.config(state="normal")
         self.log.insert("end", msg + "\n")

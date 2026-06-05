@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import pypdf\")",
+      "Bash(python3 -c \"import PyPDF2\")",
+      "Bash(python3 -c \"import fitz\")",
+      "Bash(pdftotext -layout /home/michka/.claude/projects/-home-michka-projets-DrawBot-Michka-Drawbot/6105215d-1541-4841-9d66-128f0ab7d9b5/tool-results/webfetch-1780656118208-uirnpj.pdf /tmp/ds33.txt)",
+      "Read(//tmp/**)",
+      "Bash(grep -n -i -E \"turn-on|turn on|Ton|boot time|t.{0,3}boot|WHO_AM_I|0F|0Fh|105|enabled.*data|valid data\" /tmp/ds33.txt)",
+      "Bash(~/.platformio/penv/bin/platformio run *)"
+    ]
+  }
+}
