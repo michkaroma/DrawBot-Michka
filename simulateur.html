@@ -1,0 +1,374 @@
+<h2 class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Simulateur 2D du Drawbot avec modèle moteur réaliste (constante de temps) et comparaison avec la trajectoire idéale.</h2>
+
+<div style="display:flex; flex-direction:column; gap:10px; padding:0.5rem 0;">
+  <label style="font-size:13px; color:var(--color-text-secondary);">Séquence (F:cm, B:cm, L:°, R:°, A:rayon:°, V:vG:vD:secondes)</label>
+  <textarea id="cmds" rows="3" style="width:100%; font-family:var(--font-mono); font-size:13px;">F:20;V:-1.69:2.00:0.11</textarea>
+
+  <div style="display:flex; flex-wrap:wrap; gap:8px;">
+    <button id="preSeq1" style="font-size:13px;">SEQ:1 firmware (escalier)</button>
+    <button id="preSin" style="font-size:13px;">Coin parfait sin/cos</button>
+    <button id="preEsc" style="font-size:13px;">Escalier F/L/R naïf</button>
+    <button id="preCer" style="font-size:13px;">Cercle r=10</button>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(140px, 1fr)); gap:10px; align-items:end;">
+    <div><label style="font-size:12px; color:var(--color-text-secondary);">Entraxe e [cm]</label><input id="track" type="number" value="8.5" step="0.1" style="width:100%;"></div>
+    <div><label style="font-size:12px; color:var(--color-text-secondary);">Offset stylo d [cm]</label><input id="penOff" type="number" value="13" step="0.1" style="width:100%;"></div>
+    <div><label style="font-size:12px; color:var(--color-text-secondary);">τ moteur [ms]</label><input id="tau" type="number" value="60" step="10" min="0" style="width:100%;"></div>
+    <div><label style="font-size:12px; color:var(--color-text-secondary);">Pivot L/R</label>
+      <select id="pivotMode" style="width:100%;">
+        <option value="axe">Axe des roues</option>
+        <option value="stylo">Autour du stylo</option>
+      </select>
+    </div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:10px; align-items:center;">
+    <div style="display:flex; align-items:center; gap:8px;"><label style="font-size:12px; color:var(--color-text-secondary); white-space:nowrap;">Accélération sim</label><input id="speed" type="range" min="0.5" max="6" step="0.5" value="1.5" style="flex:1;"><span id="speedOut" style="font-size:12px; min-width:30px;">x1.5</span></div>
+    <div style="display:flex; align-items:center; gap:8px;"><label style="font-size:12px; color:var(--color-text-secondary); white-space:nowrap;">Zoom</label><input id="zoom" type="range" min="2" max="8" step="1" value="4" style="flex:1;"><span id="zoomOut" style="font-size:12px; min-width:42px;">4 px/cm</span></div>
+    <label style="font-size:13px; display:flex; align-items:center; gap:8px;"><input type="checkbox" id="ghost" checked style="width:auto;"> Afficher la trajectoire idéale (pointillés)</label>
+  </div>
+
+  <div style="border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md); padding:10px 12px; display:flex; flex-direction:column; gap:8px;">
+    <label style="font-size:13px; display:flex; align-items:center; gap:8px;"><input type="checkbox" id="manual" style="width:auto;"> Pilotage manuel des roues</label>
+    <div style="display:flex; align-items:center; gap:8px;"><span style="font-size:12px; color:var(--color-text-secondary); min-width:88px;">Roue gauche</span><input id="mvg" type="range" min="-29" max="29" step="0.5" value="0" style="flex:1;"><span id="mvgOut" style="font-size:12px; min-width:64px;">0.0 cm/s</span></div>
+    <div style="display:flex; align-items:center; gap:8px;"><span style="font-size:12px; color:var(--color-text-secondary); min-width:88px;">Roue droite</span><input id="mvd" type="range" min="-29" max="29" step="0.5" value="0" style="flex:1;"><span id="mvdOut" style="font-size:12px; min-width:64px;">0.0 cm/s</span></div>
+    <div><button id="mstop" style="font-size:13px;">Stop roues</button></div>
+  </div>
+
+  <div style="display:flex; gap:8px;">
+    <button id="run" style="font-size:14px;"><i class="ti ti-player-play" aria-hidden="true" style="font-size:16px; vertical-align:-2px;"></i> Lancer</button>
+    <button id="pause" style="font-size:14px;"><i class="ti ti-player-pause" aria-hidden="true" style="font-size:16px; vertical-align:-2px;"></i> Pause</button>
+    <button id="reset" style="font-size:14px;"><i class="ti ti-refresh" aria-hidden="true" style="font-size:16px; vertical-align:-2px;"></i> Réinitialiser</button>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(95px, 1fr)); gap:8px;">
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px;"><div style="font-size:11px; color:var(--color-text-secondary);">x stylo [cm]</div><div id="rx" style="font-size:17px; font-weight:500;">0.0</div></div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px;"><div style="font-size:11px; color:var(--color-text-secondary);">y stylo [cm]</div><div id="ry" style="font-size:17px; font-weight:500;">0.0</div></div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px;"><div style="font-size:11px; color:var(--color-text-secondary);">Cap [°]</div><div id="rth" style="font-size:17px; font-weight:500;">90</div></div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px;"><div style="font-size:11px; color:var(--color-text-secondary);">vG réelle [cm/s]</div><div id="rvg" style="font-size:17px; font-weight:500;">0.0</div></div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px;"><div style="font-size:11px; color:var(--color-text-secondary);">vD réelle [cm/s]</div><div id="rvd" style="font-size:17px; font-weight:500;">0.0</div></div>
+    <div style="background:var(--color-background-secondary); border-radius:var(--border-radius-md); padding:8px 12px;"><div style="font-size:11px; color:var(--color-text-secondary);">écart idéal [cm]</div><div id="rdev" style="font-size:17px; font-weight:500;">0.0</div></div>
+  </div>
+
+  <canvas id="cv" width="680" height="440" style="width:100%; border:0.5px solid var(--color-border-tertiary); border-radius:var(--border-radius-md);"></canvas>
+</div>
+
+<script>
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const W = cv.width, H = cv.height;
+const $ = id => document.getElementById(id);
+const px = () => parseFloat($('zoom').value);
+const trackE = () => parseFloat($('track').value)||8.5;
+const baseV = 12, baseW = Math.PI/2;
+
+let stR = {x:0, y:-30, th: Math.PI/2};   // robot reel (avec lag moteur)
+let stI = {x:0, y:-30, th: Math.PI/2};   // robot ideal
+let wG = 0, wD = 0;                       // vitesses de roues reelles
+let traceR = [], traceI = [];
+let queue = [], cur = null;
+let running = false, paused = false;
+let vgDisp = 0, vdDisp = 0;
+
+function penPos(s){ const d = parseFloat($('penOff').value)||13; return {x: s.x + d*Math.cos(s.th), y: s.y + d*Math.sin(s.th)}; }
+function wheels(s){
+  const e = trackE();
+  const lx = -Math.sin(s.th), ly = Math.cos(s.th);
+  return [{x:s.x + e/2*lx, y:s.y + e/2*ly}, {x:s.x - e/2*lx, y:s.y - e/2*ly}];
+}
+function toCanvas(x, y){ return [W/2 + x*px(), H/2 - y*px()]; }
+
+function parse(txt){
+  const out = [];
+  txt.split(/[;\n]+/).forEach(t => {
+    t = t.trim(); if(!t) return;
+    let m = t.match(/^V\s*:\s*(-?\d+\.?\d*)\s*:\s*(-?\d+\.?\d*)\s*:\s*(\d+\.?\d*)$/i);
+    if(m){ out.push({t:'V', vg:parseFloat(m[1]), vd:parseFloat(m[2]), dur:parseFloat(m[3])}); return; }
+    m = t.match(/^([FBLRASE])\s*:?\s*(-?\d+\.?\d*)?\s*(?::\s*(-?\d+\.?\d*))?$/i);
+    if(!m) return;
+    const c = m[1].toUpperCase(), a = parseFloat(m[2]), b = parseFloat(m[3]);
+    if(c === 'F' && a > 0) out.push({t:'M', d:a});
+    if(c === 'B' && a > 0) out.push({t:'M', d:-a});
+    if(c === 'L' && a) out.push({t:'R', a:a*Math.PI/180});
+    if(c === 'R' && a) out.push({t:'R', a:-a*Math.PI/180});
+    if(c === 'A' && a && b) out.push({t:'A', r:a, a:b*Math.PI/180});
+  });
+  return out;
+}
+
+function rotAround(s, cx, cy, dth){
+  const c = Math.cos(dth), sn = Math.sin(dth);
+  const dx = s.x - cx, dy = s.y - cy;
+  s.x = cx + dx*c - dy*sn;
+  s.y = cy + dx*sn + dy*c;
+  s.th += dth;
+}
+
+function diffDrive(s, vg, vd, dt){
+  const e = trackE();
+  const om = (vd - vg)/e, v = (vg + vd)/2;
+  if(Math.abs(om) < 1e-7){
+    s.x += v*dt*Math.cos(s.th);
+    s.y += v*dt*Math.sin(s.th);
+  } else {
+    const R = v/om;
+    rotAround(s, s.x - R*Math.sin(s.th), s.y + R*Math.cos(s.th), om*dt);
+  }
+}
+
+// mouvements en repere robot, appliques aux DEUX etats (F/B/L/R sont
+// en boucle fermee position sur le vrai robot -> consideres exacts)
+function moveBoth(ds){
+  [stR, stI].forEach(s => { s.x += ds*Math.cos(s.th); s.y += ds*Math.sin(s.th); });
+}
+function rotBoth(da){
+  [stR, stI].forEach(s => {
+    let cx = s.x, cy = s.y;
+    if($('pivotMode').value === 'stylo'){ const p = penPos(s); cx = p.x; cy = p.y; }
+    rotAround(s, cx, cy, da);
+  });
+}
+function arcBoth(r, da){
+  [stR, stI].forEach(s => {
+    const sg = da > 0 ? 1 : -1;
+    const cx = s.x + sg*Math.abs(r)*(-Math.sin(s.th));
+    const cy = s.y + sg*Math.abs(r)*Math.cos(s.th);
+    rotAround(s, cx, cy, da);
+  });
+}
+
+function lagWheels(vgCmd, vdCmd, dt){
+  const tau = Math.max(0, parseFloat($('tau').value)||0)/1000;
+  if(tau < 0.001){ wG = vgCmd; wD = vdCmd; }
+  else {
+    const a = Math.min(1, dt/tau);
+    wG += (vgCmd - wG)*a;
+    wD += (vdCmd - wD)*a;
+  }
+}
+
+function step(dt){
+  if(!cur){
+    cur = queue.shift();
+    if(!cur){ running = false; return; }
+    cur.done = 0;
+  }
+  const mult = parseFloat($('speed').value);
+  if(cur.t === 'M'){
+    const v = baseV*mult;
+    let ds = Math.min(v*dt, Math.abs(cur.d) - cur.done);
+    moveBoth((cur.d > 0 ? 1 : -1)*ds);
+    lagWheels(0, 0, dt);
+    cur.done += ds;
+    if(cur.done >= Math.abs(cur.d) - 1e-9) cur = null;
+  } else if(cur.t === 'R'){
+    const w = baseW*mult;
+    let da = Math.min(w*dt, Math.abs(cur.a) - cur.done);
+    rotBoth((cur.a > 0 ? 1 : -1)*da);
+    lagWheels(0, 0, dt);
+    cur.done += da;
+    if(cur.done >= Math.abs(cur.a) - 1e-9) cur = null;
+  } else if(cur.t === 'A'){
+    const w = (baseV*mult)/Math.max(Math.abs(cur.r), 0.5);
+    let da = Math.min(w*dt, Math.abs(cur.a) - cur.done);
+    arcBoth(cur.r, (cur.a > 0 ? 1 : -1)*da);
+    lagWheels(0, 0, dt);
+    cur.done += da;
+    if(cur.done >= Math.abs(cur.a) - 1e-9) cur = null;
+  } else if(cur.t === 'V'){
+    let dte = Math.min(dt*mult, cur.dur - cur.done);
+    diffDrive(stI, cur.vg, cur.vd, dte);     // ideal : reponse instantanee
+    lagWheels(cur.vg, cur.vd, dte);          // reel : premier ordre
+    diffDrive(stR, wG, wD, dte);
+    cur.done += dte;
+    if(cur.done >= cur.dur - 1e-9) cur = null;
+  }
+  pushTraces();
+}
+
+function pushTraces(){
+  const pR = penPos(stR), pI = penPos(stI);
+  const lr = traceR[traceR.length-1];
+  if(!lr || (pR.x-lr.x)**2 + (pR.y-lr.y)**2 > 0.0025) traceR.push(pR);
+  const li = traceI[traceI.length-1];
+  if(!li || (pI.x-li.x)**2 + (pI.y-li.y)**2 > 0.0025) traceI.push(pI);
+}
+
+function drawTrace(tr, color, dashed){
+  if(tr.length < 2) return;
+  ctx.strokeStyle = color; ctx.lineWidth = dashed ? 1.5 : 2; ctx.lineJoin = 'round';
+  ctx.setLineDash(dashed ? [5,4] : []);
+  ctx.beginPath();
+  let [x0,y0] = toCanvas(tr[0].x, tr[0].y);
+  ctx.moveTo(x0,y0);
+  for(let i=1;i<tr.length;i++){ const [x,y] = toCanvas(tr[i].x, tr[i].y); ctx.lineTo(x,y); }
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  const s = px();
+  ctx.strokeStyle = 'rgba(128,128,128,0.15)'; ctx.lineWidth = 1;
+  for(let x = (W/2)%(5*s); x < W; x += 5*s){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for(let y = (H/2)%(5*s); y < H; y += 5*s){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(128,128,128,0.35)';
+  ctx.beginPath(); ctx.moveTo(W/2,0); ctx.lineTo(W/2,H); ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+  ctx.fillStyle = '#888780'; ctx.font = '11px sans-serif';
+  ctx.fillText('5 cm / carreau — vert = réel, pointillés = idéal', 8, H-8);
+
+  if($('ghost').checked) drawTrace(traceI, 'rgba(136,135,128,0.55)', true);
+  drawTrace(traceR, '#1D9E75', false);
+
+  const [wl, wr] = wheels(stR);
+  const p = penPos(stR);
+  const [ax,ay] = toCanvas(wl.x, wl.y), [bx,by] = toCanvas(wr.x, wr.y);
+  const [mx,my] = toCanvas(stR.x, stR.y), [pxx,pyy] = toCanvas(p.x, p.y);
+  ctx.strokeStyle = '#888780'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(ax,ay); ctx.lineTo(bx,by); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(mx,my); ctx.lineTo(pxx,pyy); ctx.stroke();
+  const wlen = 3*s, hxv = Math.cos(stR.th), hyv = Math.sin(stR.th);
+  [[ax,ay],[bx,by]].forEach(([cx,cy]) => {
+    ctx.strokeStyle = '#534AB7'; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(cx - hxv*wlen/2, cy + hyv*wlen/2);
+    ctx.lineTo(cx + hxv*wlen/2, cy - hyv*wlen/2);
+    ctx.stroke();
+  });
+  ctx.fillStyle = '#888780';
+  ctx.beginPath(); ctx.arc(mx,my, Math.max(3, 0.8*s), 0, 7); ctx.fill();
+  ctx.fillStyle = '#E24B4A';
+  ctx.beginPath(); ctx.arc(pxx,pyy, Math.max(3, 0.6*s), 0, 7); ctx.fill();
+}
+
+function updateRead(){
+  const p = penPos(stR), pi = penPos(stI);
+  $('rx').textContent = p.x.toFixed(1);
+  $('ry').textContent = p.y.toFixed(1);
+  let deg = (stR.th*180/Math.PI) % 360; if(deg < 0) deg += 360;
+  $('rth').textContent = Math.round(deg);
+  $('rvg').textContent = vgDisp.toFixed(1);
+  $('rvd').textContent = vdDisp.toFixed(1);
+  $('rdev').textContent = Math.hypot(p.x-pi.x, p.y-pi.y).toFixed(1);
+}
+
+let lastT = null;
+function loop(t){
+  if(lastT === null) lastT = t;
+  const dt = Math.min((t - lastT)/1000, 0.05);
+  lastT = t;
+  const [wl0, wr0] = wheels(stR);
+  if($('manual').checked && !paused && dt > 0){
+    lagWheels(parseFloat($('mvg').value), parseFloat($('mvd').value), dt);
+    diffDrive(stR, wG, wD, dt);
+    diffDrive(stI, parseFloat($('mvg').value), parseFloat($('mvd').value), dt);
+    pushTraces();
+  } else if(running && !paused && dt > 0){
+    step(dt);
+  } else { wG *= 0.9; wD *= 0.9; }
+  const [wl1, wr1] = wheels(stR);
+  const hx = Math.cos(stR.th), hy = Math.sin(stR.th);
+  vgDisp = dt > 0 ? ((wl1.x-wl0.x)*hx + (wl1.y-wl0.y)*hy)/dt : 0;
+  vdDisp = dt > 0 ? ((wr1.x-wr0.x)*hx + (wr1.y-wr0.y)*hy)/dt : 0;
+  draw();
+  updateRead();
+  requestAnimationFrame(loop);
+}
+
+// SEQ:1 du firmware : F:20 + tableau ESCALIER exact (durees ms -> s)
+function preSeq1(){
+  const left = [[-1.69,2.00,110],[-1.37,2.31,110],[-1.05,2.61,110],[-0.72,2.91,120],
+    [-0.39,3.20,120],[-0.07,3.47,120],[0.26,3.74,120],[0.59,4.00,120],
+    [0.92,4.25,130],[1.24,4.49,130],[1.56,4.71,130],[1.88,4.92,140],
+    [2.19,5.12,140],[2.49,5.30,100]];
+  const right = [[4.79,2.77],[4.92,3.06],[5.00,3.27],[5.06,3.45],[5.11,3.60],
+    [5.15,3.74],[5.18,3.86],[5.20,3.97],[5.21,4.07],[5.22,4.16],[5.23,4.23],
+    [5.23,4.31],[5.23,4.38],[5.23,4.43],[5.22,4.49],[5.22,4.53],[5.21,4.57],
+    [5.20,4.61],[5.19,4.65],[5.19,4.68],[5.18,4.71],[5.17,4.73],[5.16,4.76],
+    [5.15,4.77],[5.14,4.80],[5.13,4.81],[5.13,4.83],[5.12,4.84],[5.11,4.86],
+    [5.10,4.86],[5.10,4.88],[5.09,4.89],[5.09,4.89],[5.08,4.91],[5.07,4.91],
+    [5.07,4.92],[5.06,4.93],[5.06,4.93],[5.06,4.93],[5.05,4.94]];
+  const l1 = left.map(c => 'V:' + c[0] + ':' + c[1] + ':' + (c[2]/1000));
+  const l2 = right.map(c => 'V:' + c[0] + ':' + c[1] + ':0.2');
+  $('cmds').value = 'F:20\n' + l1.join(';') + '\nV:0:0:0.2\n' + l2.join(';');
+}
+
+function genSinCos(){
+  const d = parseFloat($('penOff').value)||13;
+  const e = trackE();
+  const Vp = 5, N = 30;
+  const lines = [];
+  for(let k=0; k<N; k++){
+    const phi = (90 + (k+0.5)*90/N) * Math.PI/180;
+    const v = -Vp*Math.cos(phi);
+    const om = Vp*Math.sin(phi)/d;
+    const wg = v - om*e/2, wd = v + om*e/2;
+    const dur = ((90/N)*Math.PI/180)/om;
+    lines.push('V:' + wg.toFixed(2) + ':' + wd.toFixed(2) + ':' + dur.toFixed(2));
+  }
+  $('cmds').value = 'F:20\n' + lines.join(';') + '\nF:20';
+}
+
+function tracerFleche() {
+    // Récupération des paramètres physiques du simulateur
+    const d = parseFloat(document.getElementById('penOff').value) || 13;
+    const e = parseFloat(document.getElementById('track').value) || 8.5;
+    const Vp = 5; // Vitesse cible du stylo en cm/s
+    const N = 30; // Nombre de micro-segments par virage
+    let cmds = [];
+
+    // La fonction magique qui calcule le "Tail Swing" pour n'importe quel angle
+    function virage(angle) {
+        let rad = angle * Math.PI / 180;
+        for(let k = 0; k < N; k++) {
+            // Angle restant à parcourir
+            let a = rad * (1 - (k + 0.5) / N);
+            
+            // Calcul des vitesses pour maintenir le stylo sur une ligne droite
+            let v = Vp * Math.cos(a);
+            let om = (Vp / d) * Math.sin(a);
+            
+            let wg = v - om * e / 2;
+            let wd = v + om * e / 2;
+            let dur = Math.abs(rad) / N / Math.abs(om);
+            
+            cmds.push(`V:${wg.toFixed(2)}:${wd.toFixed(2)}:${dur.toFixed(2)}`);
+        }
+    }
+
+    // Votre séquence (avec le F:10 final corrigé)
+    const sequence = "F:10; L:90; F:5; R:135; F:14.14; R:90; F:14.14; R:135; F:5; L:90; F:10; R:90; F:10";
+    
+    // Traduction de la séquence humaine en code machine V:vG:vD:dur
+    sequence.split(';').forEach(cmd => {
+        let parts = cmd.trim().split(':');
+        if(parts[0] === 'F') cmds.push(cmd.trim());
+        if(parts[0] === 'L') virage(parseFloat(parts[1]));
+        if(parts[0] === 'R') virage(-parseFloat(parts[1]));
+    });
+
+    // Injection directe dans le simulateur
+    document.getElementById('cmds').value = cmds.join(';');
+}
+
+
+$('run').onclick = () => { queue = queue.concat(parse($('cmds').value)); running = true; paused = false; };
+$('pause').onclick = () => { paused = !paused; };
+$('reset').onclick = () => {
+  stR = {x:0, y:-30, th:Math.PI/2}; stI = {x:0, y:-30, th:Math.PI/2};
+  wG = 0; wD = 0; traceR = []; traceI = []; queue = []; cur = null; running = false;
+};
+$('speed').oninput = e => $('speedOut').textContent = 'x' + e.target.value;
+$('zoom').oninput = e => $('zoomOut').textContent = e.target.value + ' px/cm';
+$('mvg').oninput = e => $('mvgOut').textContent = parseFloat(e.target.value).toFixed(1) + ' cm/s';
+$('mvd').oninput = e => $('mvdOut').textContent = parseFloat(e.target.value).toFixed(1) + ' cm/s';
+$('mstop').onclick = () => { $('mvg').value = 0; $('mvd').value = 0; $('mvgOut').textContent = '0.0 cm/s'; $('mvdOut').textContent = '0.0 cm/s'; };
+$('preSeq1').onclick = preSeq1;
+$('preSin').onclick = genSinCos;
+$('preEsc').onclick = () => $('cmds').value = 'F:20;L:90;F:10;R:90;F:40';
+$('preCer').onclick = () => $('cmds').value = 'A:10:360';
+
+draw(); updateRead();
+requestAnimationFrame(loop);
+</script>

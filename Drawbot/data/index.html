@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drawbot WiFi</title>
+<style>
+:root{--blue:#3f5cff;--cyan:#00b884;--red:#ff3b6b;--text:#14213d;--muted:#6a7893}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;overflow-y:auto;background:linear-gradient(135deg,#ffffff,#eef5ff);font-family:Inter,Segoe UI,Arial,sans-serif;color:var(--text)}
+header{height:62px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:rgba(255,255,255,.8);backdrop-filter:blur(10px);border-bottom:1px solid #dfe7ff;position:sticky;top:0;z-index:10}
+.brand{font-weight:900;letter-spacing:5px;color:var(--blue);font-size:22px}.status{font-weight:800;color:var(--muted)}.dot{display:inline-block;width:11px;height:11px;border-radius:50%;background:var(--red);box-shadow:0 0 14px var(--red);margin-right:8px}
+.grid{display:grid;grid-template-columns:330px 1fr 350px;gap:14px;padding:14px;align-items:start}
+.card{background:rgba(255,255,255,.76);border:1px solid white;border-radius:24px;box-shadow:0 18px 45px rgba(51,72,130,.14);padding:16px;backdrop-filter:blur(14px)}
+h3{margin:0 0 14px;color:var(--blue);font-size:12px;letter-spacing:2.5px;text-transform:uppercase;border-bottom:1px solid #dfe7ff;padding-bottom:9px}
+button{border:1px solid #dbe5ff;background:#fff;border-radius:15px;padding:10px 12px;font-weight:800;cursor:pointer;color:#1d2b4f;box-shadow:0 8px 20px rgba(70,90,140,.12)}
+button:hover{color:var(--blue)}button:active{transform:scale(.97)}
+.actions{display:grid;gap:9px}.row{display:grid;grid-template-columns:80px 1fr 60px;gap:10px;align-items:center;margin:10px 0}
+input[type=range]{width:100%}.pad{display:grid;grid-template-columns:75px 75px 75px;gap:10px;justify-content:center;margin:18px 0}.pad button{height:70px;font-size:26px}.stop{color:var(--red);background:#ffe4eb}
+canvas{width:100%;height:650px;border-radius:20px;background:#fbfdff;border:1px solid #dfe7ff;display:block}
+.kpis{display:grid;grid-template-columns:1fr 1fr;gap:10px}.kpi{background:#fff;border:1px solid #dfe7ff;border-radius:18px;padding:14px;text-align:center}.kpi small{display:block;color:var(--muted);font-weight:900;letter-spacing:1px}.kpi b{font-size:24px;color:var(--cyan)}.full{grid-column:1/-1}
+.val{display:flex;justify-content:space-between;gap:10px;background:#fff;border:1px solid #dfe7ff;border-radius:14px;padding:9px 10px;margin:7px 0;font-weight:750}.val span{color:var(--muted)}
+.bottom{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:0 14px 20px}
+@media(max-width:1100px){.grid,.bottom{grid-template-columns:1fr}canvas{height:420px}}
+</style>
+</head>
+<body>
+<header><div class="brand">DRAWBOT</div><div class="status"><span class="dot" id="dot"></span><span id="net">Déconnecté</span></div></header>
+
+<div class="grid">
+<section class="card">
+<h3>Commandes</h3>
+<div class="pad">
+<div></div><button onmousedown="manual('f')" onmouseup="manual('stop')" ontouchstart="manual('f')" ontouchend="manual('stop')">↑</button><div></div>
+<button onmousedown="manual('l')" onmouseup="manual('stop')" ontouchstart="manual('l')" ontouchend="manual('stop')">←</button>
+<button class="stop" onclick="manual('stop')">■</button>
+<button onmousedown="manual('r')" onmouseup="manual('stop')" ontouchstart="manual('r')" ontouchend="manual('stop')">→</button>
+<div></div><button onmousedown="manual('b')" onmouseup="manual('stop')" ontouchstart="manual('b')" ontouchend="manual('stop')">↓</button><div></div>
+</div>
+<div class="row"><b>Vitesse</b><input id="speed" type="range" min="200" max="255" value="220"><span id="speedv">220</span></div>
+<div class="row"><b>Rayon</b><input id="radius" type="range" min="2" max="20" value="13"><span><span id="radiusv">13</span>cm</span></div>
+<div class="actions">
+<p style="font-size:12px;color:#6a7893;margin:0 0 6px">Flèche Nord : le robot s’aligne à 0°, puis trace une tige et une pointe triangulaire.</p>
+<button onclick="cmd('seq1')">Séq. 1 — Escalier</button>
+<button onclick="cmd('seq2', '&radius='+radius.value)">Séq. 2 — Cercle (rayon choisi)</button>
+<button onclick="cmd('arrow')">Flèche Nord — aligner puis tracer</button>
+<button onclick="cmd('set_north')">Définir Nord = position actuelle</button>
+<button onclick="cmd('face_north')">Orienter Nord</button>
+<button onclick="cmd('mag_calib')">Calibrer magnétomètre</button>
+<button onclick="cmd('reset')">Reset odométrie</button>
+<button onclick="cmd('stop')">Stop parcours</button>
+<button onclick="pts=[];drawGrid()">Effacer carte</button>
+</div>
+</section>
+
+<section class="card">
+<h3>Carte trajectoire du feutre</h3>
+<canvas id="map" width="1100" height="650"></canvas>
+</section>
+
+<section class="card">
+<h3>État robot</h3>
+<div class="kpis">
+<div class="kpi"><small>X feutre</small><b id="x">0</b> cm</div>
+<div class="kpi"><small>Y feutre</small><b id="y">0</b> cm</div>
+<div class="kpi full"><small>Orientation</small><b id="theta">0</b>°</div>
+<div class="kpi full"><small>Cap Nord</small><b id="heading">—</b>°</div>
+</div>
+<div class="val"><span>Statut</span><b id="status">idle</b></div>
+<div class="val"><span>Message</span><b id="msg">—</b></div>
+<div class="val"><span>Point</span><b id="point">0/0</b></div>
+<div class="val"><span>Rayon cercle</span><b id="rad">—</b></div>
+<div class="val"><span>Ticks D</span><b id="td">0</b></div>
+<div class="val"><span>Ticks G</span><b id="tg">0</b></div>
+</section>
+</div>
+
+<div class="bottom">
+<section class="card">
+<h3>Magnétomètre</h3>
+<div class="val"><span>Mx brut</span><b id="mx">0</b></div>
+<div class="val"><span>My brut</span><b id="my">0</b></div>
+<div class="val"><span>Mz brut</span><b id="mz">0</b></div>
+<div class="val"><span>Calibré</span><b id="mcal">non</b></div>
+<div class="val"><span>Offset X</span><b id="ox">0</b></div>
+<div class="val"><span>Offset Y</span><b id="oy">0</b></div>
+<div class="val"><span>Référence Nord</span><b id="nr">0</b></div>
+</section>
+<section class="card">
+<h3>PID (valeurs firmware)</h3>
+<div class="val"><span>Virage gyro Kp/Ki/Kd</span><b id="pid_turn">—</b></div>
+<div class="val"><span>PI vitesse roues Kp/Ki</span><b id="pid_v">—</b></div>
+<div class="val"><span>Flèche distance Kp/Ki/Kd</span><b id="pid_dist">—</b></div>
+<div class="val"><span>Flèche angle Kp/Ki/Kd</span><b id="pid_angle">—</b></div>
+</section>
+</div>
+
+<script>
+let pts=[];
+const c=document.getElementById('map'),ctx=c.getContext('2d');
+const radius=document.getElementById('radius');
+document.getElementById('speed').oninput=e=>speedv.textContent=e.target.value;
+radius.oninput=e=>radiusv.textContent=e.target.value;
+
+function cmd(name,args=''){fetch(`/cmd?cmd=${encodeURIComponent(name)}${args}`).catch(()=>{})}
+function manual(dir){fetch(`/manual?dir=${dir}&speed=${document.getElementById('speed').value}`).catch(()=>{})}
+
+function drawGrid(){
+  ctx.clearRect(0,0,c.width,c.height);
+  ctx.strokeStyle='#e3ebff';ctx.lineWidth=1;
+  for(let x=0;x<c.width;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,c.height);ctx.stroke()}
+  for(let y=0;y<c.height;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(c.width,y);ctx.stroke()}
+}
+function draw(d){
+  drawGrid();
+  pts.push([d.x*100,d.y*100]); if(pts.length>2500)pts.shift();
+  ctx.strokeStyle='#3f5cff';ctx.lineWidth=3;ctx.beginPath();
+  pts.forEach((p,i)=>{let x=c.width/2+p[0]*6,y=c.height/2-p[1]*6;if(i==0)ctx.moveTo(x,y);else ctx.lineTo(x,y)});
+  ctx.stroke();
+  let last=pts[pts.length-1]; if(!last)return;
+  let x0=c.width/2+last[0]*6,y0=c.height/2-last[1]*6;
+  ctx.fillStyle='#00b884';ctx.beginPath();ctx.arc(x0,y0,7,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#ff3b6b';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(x0,y0);
+  ctx.lineTo(x0+35*Math.cos(d.theta), y0-35*Math.sin(d.theta));ctx.stroke();
+}
+
+async function poll(){
+ try{
+  const d=await (await fetch('/data')).json();
+  dot.style.background='#00b884';
+  net.textContent='Connecté ESP32'+(d.sta_ip?' — '+d.sta_ip:'');
+  x.textContent=(d.x*100).toFixed(1); y.textContent=(d.y*100).toFixed(1);
+  theta.textContent=d.theta_deg.toFixed(1);
+  heading.textContent=d.heading>=0?d.heading.toFixed(1):'—';
+  status.textContent=d.status; msg.textContent=d.message;
+  point.textContent=`${d.point}/${d.points}`;
+  rad.textContent=d.circle?d.radius.toFixed(1)+' cm':'—';
+  td.textContent=d.ticksD; tg.textContent=d.ticksG;
+  mx.textContent=d.mag_x; my.textContent=d.mag_y; mz.textContent=d.mag_z;
+  mcal.textContent=d.mag_calibrated?'oui':'non';
+  ox.textContent=d.mag_offset_x.toFixed(1); oy.textContent=d.mag_offset_y.toFixed(1); nr.textContent=d.north_ref.toFixed(1)+'°';
+  draw(d);
+ }catch(e){dot.style.background='#ff3b6b';net.textContent='ESP32 non joignable'}
+}
+
+async function fetchPID(){
+ try{
+  const p=await (await fetch('/pid')).json();
+  pid_turn.textContent=`${p.kp_turn} / ${p.ki_turn} / ${p.kd_turn}`;
+  pid_v.textContent=`${p.kp_v} / ${p.ki_v}`;
+  pid_dist.textContent=`${p.kp_dist} / ${p.ki_dist} / ${p.kd_dist}`;
+  pid_angle.textContent=`${p.kp_angle} / ${p.ki_angle} / ${p.kd_angle}`;
+ }catch(e){}
+}
+
+drawGrid(); setInterval(poll,150);
+fetchPID(); setInterval(fetchPID,10000);
+
+document.addEventListener('keydown',e=>{
+ if(e.repeat)return;
+ if(e.key==='ArrowUp')manual('f');
+ if(e.key==='ArrowDown')manual('b');
+ if(e.key==='ArrowLeft')manual('l');
+ if(e.key==='ArrowRight')manual('r');
+ if(e.key===' ')manual('stop');
+});
+document.addEventListener('keyup',e=>{
+ if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key))manual('stop');
+});
+</script>
+</body>
+</html>
