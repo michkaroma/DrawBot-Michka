@@ -8,62 +8,17 @@
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
 
-/*
-  ═══════════════════════════════════════════════════════════════
-  DRAWBOT — Firmware unifié (fusion projets "Michka" + "gregoire")
-  ═══════════════════════════════════════════════════════════════
 
-  Repris du projet MICHKA (référence pour tout ce qui touche au robot) :
-  - Constantes physiques : 993 ticks/tour, roues Ø 90 mm, entraxe 8,5 cm
-  - Bas niveau moteurs : PWM 20 kHz sur IN1/IN2, EN maintenu à l'état haut
-  - Asservissement en ticks (F/B), virage gyro PID (L/R)
-  - Asservissement de vitesse par roue (PI + feedforward + kick anti-friction)
-  - SEQ:1 escalier (20 cm asservi en ticks puis tractrice)
-  - SEQ:2 cercle (cinématique inverse, rayon paramétrable)
-  - IMU LSM6DS3 (gyroscope) + calibration du biais
-  - Protocole TCP texte (port 8266) -> l'interface Tkinter reste compatible
-
-  Repris du projet gregoire :
-  - WiFi + serveur HTTP (port 80) + interface HTML servie par LittleFS
-  - Odométrie x / y / theta + position du feutre (alimente la carte du HTML)
-  - Magnétomètre LIS3MDL : calibration, sauvegarde EEPROM, Définir Nord,
-    Orienter Nord, flèche Nord (alignement magnéto puis séquence de
-    vitesses asservies relevée expérimentalement, comme l'escalier)
-  - Routes /data, /cmd, /manual, /pid
-
-  Supprimé (doublons devenus inutiles) :
-  - Escalier "3 points de passage" et cercle par waypoints du gregoire
-    (remplacés par les séquences Michka)
-  - Navigation multi-points PID (waypoints + odométrie) : la flèche Nord
-    est désormais une séquence de vitesses asservies (table FLECHE)
-
-  WiFi : mode AP + STA simultané.
-  - AP  : réseau "Drawbot" (mdp 12345678), interface sur http://192.168.4.1
-  - STA : rejoint "i.t.WORKS N300" si dispo, IP locale affichée dans le HTML
-
-  ⚠ PlatformIO : le HTML va dans le dossier  data/index.html  du projet,
-    à téléverser avec  pio run -t uploadfs.
-    Ajouter dans platformio.ini :  board_build.filesystem = littlefs
-
-  ⚠ À RE-RÉGLER sur le robot (hérité du gregoire, le bas niveau a changé) :
-    - vitesses de rotation de faceNorth() et calibrateMagnetometer()
-*/
-
-// ═══════════════════════════════════════════════════════════════
 // Réseau
-// ═══════════════════════════════════════════════════════════════
 const char* AP_SSID  = "Drawbot";
 const char* AP_PASS  = "12345678";
 const char* STA_SSID = "i.t.WORKS N300";
-const char* STA_PASS = "";              // réseau ouvert ; renseigner si besoin
+const char* STA_PASS = "";
 
-WebServer server(80);                   // interface HTML
-WiFiServer tcpServer(8266);             // interface Tkinter (protocole texte)
+WebServer server(80);
+WiFiServer tcpServer(8266);
 WiFiClient tcpClient;
 
-// ═══════════════════════════════════════════════════════════════
-// Brochage (cf. kick-off slide 6)
-// ═══════════════════════════════════════════════════════════════
 #define LEDU1 25
 #define LEDU2 26
 #define EN_D 23
@@ -79,9 +34,6 @@ WiFiClient tcpClient;
 #define PIN_SDA 21
 #define PIN_SCL 22
 
-// ═══════════════════════════════════════════════════════════════
-// PWM (LEDC) — schéma Michka : PWM sur IN1/IN2 à 20 kHz, EN à 1
-// ═══════════════════════════════════════════════════════════════
 #define LEDC_FREQ 20000
 #define LEDC_RES 8
 #define CH_IN1_D 0
@@ -89,61 +41,44 @@ WiFiClient tcpClient;
 #define CH_IN1_G 2
 #define CH_IN2_G 3
 
-// ═══════════════════════════════════════════════════════════════
-// Calibration mécanique (valeurs Michka, validées par les séquences)
-// ═══════════════════════════════════════════════════════════════
 #define TICKS_PER_REV 993
 #define WHEEL_DIAM_MM 90.0f
 #define WHEEL_CIRCUM_CM (PI * WHEEL_DIAM_MM / 10.0f)
 #define TICKS_PER_CM (TICKS_PER_REV / WHEEL_CIRCUM_CM)   // ~35.1 ticks/cm
 #define TRACK_WIDTH_CM 8.5f
 
-// !!! A RECALIBRER !!! (utilisé uniquement par le repli encodeur des virages)
 #define TURN_CORRECTION 1.0f
 
-// Mêmes grandeurs en unités SI pour l'odométrie (carte du HTML)
-const float RAYON_ROUE_M   = (WHEEL_DIAM_MM / 2.0f) / 1000.0f;  // 0.045 m
-const float ENTRAXE_M      = TRACK_WIDTH_CM / 100.0f;           // 0.085 m
-const float PERIMETRE_M    = 2.0f * PI * RAYON_ROUE_M;          // ~0.2827 m
-const float OFFSET_STYLO_M = 0.13f;                             // feutre 13 cm devant l'axe
 
-// ═══════════════════════════════════════════════════════════════
-// Asservissement en ticks (trajets droits F/B) — Michka
-// ═══════════════════════════════════════════════════════════════
-#define PWM_MIN 200            // seuil de friction statique (mesuré)
+const float RAYON_ROUE_M   = (WHEEL_DIAM_MM / 2.0f) / 1000.0f;
+const float ENTRAXE_M      = TRACK_WIDTH_CM / 100.0f;
+const float PERIMETRE_M    = 2.0f * PI * RAYON_ROUE_M;
+const float OFFSET_STYLO_M = 0.13f;
+
+#define PWM_MIN 200
 #define PWM_MAX 240
-#define KP 1.8f                // gain proportionnel (ticks -> PWM)
-#define KSYNC 1.2f             // gain de synchro entre les deux roues
-#define TOL_TICKS 4            // tolérance d'arrêt (~1 mm de roue)
-#define CONTROL_PERIOD_MS 10   // période d'échantillonnage : 100 Hz
-#define BRAKE_MS 80            // durée du freinage actif
+#define KP 1.8f
+#define KSYNC 1.2f
+#define TOL_TICKS 4
+#define CONTROL_PERIOD_MS 10
+#define BRAKE_MS 80
 
-// ═══════════════════════════════════════════════════════════════
-// Asservissement de VITESSE par roue (PI + feedforward) — Michka
-// ═══════════════════════════════════════════════════════════════
-// vitesseToPWM() ne sert que de FEEDFORWARD : PWM théorique pour une
-// vitesse donnée (calibrage linéaire V_MAX_CMS <-> PWM_V_MAX, mesuré).
-// La boucle PI (controlVitesse) corrige ensuite avec la vitesse RÉELLE
-// mesurée par les encodeurs. Un "kick" anti-friction statique force
-// PWM_KICK quand une roue commandée est encore immobile.
-#define V_MAX_CMS  29.0f       // vitesse (cm/s) atteinte à PWM_V_MAX (mesuré)
-#define PWM_V_MAX  245         // PWM correspondant à V_MAX_CMS
-#define PWM_MIN_V  70          // PWM mini où la roue tourne encore
-#define PWM_KICK   200         // coup de démarrage anti-friction statique
+#define V_MAX_CMS  29.0f
+#define PWM_V_MAX  245
+#define PWM_MIN_V  70
+#define PWM_KICK   200
 
-// Gains du PI de vitesse, réglables en direct via "PIDV:kp,ki" (TCP)
-float KP_V = 8.0f;             // (cm/s d'erreur) -> PWM
-float KI_V = 300.0f;           // rattrape la friction ; anti-windup intégré
+float KP_V = 8.0f;
+float KI_V = 300.0f;
 
-// ═══════════════════════════════════════════════════════════════
-// IMU LSM6DS3 (gyroscope, I2C) — Michka
-// ═══════════════════════════════════════════════════════════════
+
+
 #define ADDR_IMU     0x6B
 #define LSM_WHO_AM_I 0x0F
 #define LSM_CTRL2_G  0x11
 #define LSM_CTRL3_C  0x12
 #define LSM_OUTZ_L_G 0x26
-#define GYRO_SENS_DPS 0.070f   // 70 mdps/LSB à pleine échelle +/-2000 dps
+#define GYRO_SENS_DPS 0.070f
 #define GYRO_Z_SIGN  +1.0f
 
 // PID du virage (boucle fermée sur le gyroscope), réglable via "PIDT:kp,ki,kd"
@@ -155,9 +90,7 @@ float KD_TURN = 0.20f;
 #define TURN_BRAKE_LEAD_DEG 2.0f
 #define TURN_TIMEOUT_MS 8000
 
-// ═══════════════════════════════════════════════════════════════
-// Magnétomètre LIS3MDL — gregoire
-// ═══════════════════════════════════════════════════════════════
+// Magnétomètre LIS3MDL
 #define ADDR_MAG 0x1E
 #define EEPROM_SIZE 64
 #define AUTO_CALIB_FLAG 0xCC
@@ -172,17 +105,9 @@ int16_t mag_y_raw = 0;
 int16_t mag_z_raw = 0;
 float   mag_heading = -1.0f;
 
-// ═══════════════════════════════════════════════════════════════
-// Flèche Nord — flag d'affichage (/data). Le tracé lui-même est la
-// séquence de vitesses FLECHE (définie avec l'ESCALIER plus bas).
-// ═══════════════════════════════════════════════════════════════
 bool estModeFlecheNord = false;
 
-// ═══════════════════════════════════════════════════════════════
-// Odométrie — gregoire (mais avec les constantes Michka)
-// ═══════════════════════════════════════════════════════════════
-// Convention encodeurs : marche AVANT = ticks POSITIFS pour les deux
-// roues (le câblage inversé de la roue gauche est corrigé dans l'ISR).
+// Odométrie
 volatile long ticksG = 0;
 volatile long ticksD = 0;
 long lastTicksG = 0;
@@ -192,15 +117,11 @@ double x_robot = -OFFSET_STYLO_M;   // feutre en (0,0) au départ
 double y_robot = 0.0;
 double theta_robot = 0.0;
 
-// ═══════════════════════════════════════════════════════════════
-// État du mouvement (modes Michka)
-// ═══════════════════════════════════════════════════════════════
+
+// État du mouvement
 enum MotionMode { MODE_IDLE, MODE_TICKS, MODE_TURN, MODE_VSEQ };
 MotionMode motionMode = MODE_IDLE;
 
-// Trajets droits asservis en ticks (et repli virage encodeur).
-// Plus de remise à zéro des compteurs (ça casserait l'odométrie) :
-// on mémorise la valeur de départ et on vise un écart relatif.
 long tick_target = 0;
 long tick_ref_G = 0;
 long tick_ref_D = 0;
@@ -232,18 +153,14 @@ float vmes_g_f = 0.0f, vmes_d_f = 0.0f; // vitesses mesurées filtrées (cm/s)
 long  vprev_eg = 0, vprev_ed = 0;       // derniers compteurs encodeurs
 unsigned long vprev_us = 0;
 
-// ═══════════════════════════════════════════════════════════════
 // État global
-// ═══════════════════════════════════════════════════════════════
 String etatRobot = "idle";
 String lastMessage = "Pret";
 bool   stopRequested = false;   // interrompt les boucles bloquantes (faceNorth, calib)
 bool   seq2Active = false;      // un cercle Michka est chargé / en cours
 float  rayonCercle = 0.0f;
 
-// ═══════════════════════════════════════════════════════════════
 // Prototypes
-// ═══════════════════════════════════════════════════════════════
 void   envoyer(const String& msg);
 void   logMsg(const String& msg);
 double normaliserAngle(double angle);
@@ -301,18 +218,12 @@ void   handleCommand();
 void   handleManual();
 void   handlePID();
 
-// ═══════════════════════════════════════════════════════════════
 // Helpers
-// ═══════════════════════════════════════════════════════════════
-// envoyer() : sortie "console" -> client TCP (Tkinter) + port série.
 void envoyer(const String& msg) {
   if (tcpClient && tcpClient.connected()) tcpClient.println(msg);
   Serial.println(msg);
 }
 
-// logMsg() : comme envoyer(), mais mémorise aussi le message pour /data
-// (champ "Message" de l'interface HTML). À utiliser pour les événements ;
-// les simples réponses aux requêtes (E, W, G) passent par envoyer().
 void logMsg(const String& msg) {
   lastMessage = msg;
   envoyer(msg);
@@ -342,14 +253,7 @@ void getPositionStylo(double& x_stylo, double& y_stylo) {
   y_stylo = y_robot + OFFSET_STYLO_M * sin(theta_robot);
 }
 
-// ═══════════════════════════════════════════════════════════════
 // Encodeurs
-// ═══════════════════════════════════════════════════════════════
-// Convention : marche avant = +1 des deux côtés. La roue gauche compte
-// "à l'envers" à cause du câblage (vérifié sur Michka : Enc G négatif
-// après un F:20) : la correction de signe est faite ICI, une fois pour
-// toutes. Tout le reste du code (PI vitesse, odométrie) suppose des
-// ticks positifs en marche avant.
 void IRAM_ATTR isr_enc_g() {
   ticksG += (digitalRead(ENC_G_CH_B) == HIGH) ? -1 : 1;
 }
@@ -364,12 +268,8 @@ void copyTicks(long& d, long& g) {
   interrupts();
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Bas niveau moteurs (schéma Michka)
-// ═══════════════════════════════════════════════════════════════
-// Écriture PWM "brute" : sens + saturation uniquement, SANS plancher de
-// friction. Le moteur gauche a IN1/IN2 câblés à l'envers du droit :
-// l'inversion de sens est gérée ICI, de façon centralisée. v=0 => roue libre.
+
+// Bas niveau moteurs
 void ecrirePWMDroit(int v) {
   v = constrain(v, -255, 255);
   if (v >= 0) { ledcWrite(CH_IN1_D, 0);  ledcWrite(CH_IN2_D, v);  }
@@ -390,9 +290,6 @@ int vitesseToPWM(float v_cms) {
   return (v_cms < 0) ? -pwm_final : pwm_final;
 }
 
-// Commande "haut niveau" avec plancher anti-friction (asservissements F/B,
-// virages, navigation flèche Nord, manuel) : toute consigne non nulle est
-// remontée au seuil de démarrage mesuré.
 void setMoteurDroit(int vitesse) {
   vitesse = constrain(vitesse, -255, 255);
   if (vitesse > 0)      vitesse = max(vitesse, PWM_MIN);
@@ -407,8 +304,6 @@ void setMoteurGauche(int vitesse) {
   ecrirePWMGauche(vitesse);
 }
 
-// Wrapper pour le code hérité du gregoire (navigation flèche Nord, faceNorth,
-// calibration magnétomètre, mode manuel) qui travaille en float.
 void setMoteurs(float vitesseGauche, float vitesseDroite) {
   setMoteurGauche((int)vitesseGauche);
   setMoteurDroit((int)vitesseDroite);
@@ -419,7 +314,6 @@ void stopMoteurs() {
   setMoteurGauche(0);
 }
 
-// Freinage actif : les deux entrées du DRV8837 à l'état haut = mode "brake".
 void brakeMoteurs() {
   ledcWrite(CH_IN1_D, 255); ledcWrite(CH_IN2_D, 255);
   ledcWrite(CH_IN1_G, 255); ledcWrite(CH_IN2_G, 255);
@@ -427,17 +321,7 @@ void brakeMoteurs() {
   stopMoteurs();
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  Asservissement de VITESSE par roue (séquences V / tractrice / cercle)
-// ═══════════════════════════════════════════════════════════════
-// Le cœur des séquences 1 et 2 : chaque roue est asservie en vitesse
-// (cm/s) avec un PI + feedforward. Schéma bloc par roue :
-//
-//   consigne ->(+)-> PI -->(+)--> PWM --> moteur --> roue
-//              (-)         (+)                        |
-//               |       feedforward                   |
-//               +---- vitesse mesurée (encodeur) <----+
-//
+
 void resetVitessePI() {
   vint_g = vint_d = 0.0f;
   vmes_g_f = vmes_d_f = 0.0f;
@@ -451,21 +335,15 @@ void controlVitesse(float vg_cible, float vd_cible) {
   vprev_us = now;
   if (dt <= 0.0f || dt > 0.1f) dt = CONTROL_PERIOD_MS / 1000.0f;
 
-  // 1) MESURE : vitesse réelle de chaque roue depuis les encodeurs.
-  //    (Les signes sont déjà corrigés dans les ISR : avant = positif.)
   long eg, ed;
   copyTicks(ed, eg);
   float vg_mes = (float)(eg - vprev_eg) / TICKS_PER_CM / dt;
   float vd_mes = (float)(ed - vprev_ed) / TICKS_PER_CM / dt;
   vprev_eg = eg; vprev_ed = ed;
 
-  // Filtre passe-bas : à 1.7 cm/s on ne compte que ~0.6 tick par période
-  // de 10 ms, la mesure brute est très quantifiée.
   vmes_g_f = 0.75f * vmes_g_f + 0.25f * vg_mes;
   vmes_d_f = 0.75f * vmes_d_f + 0.25f * vd_mes;
 
-  // 2) PI + anti-windup (l'intégrale est bornée pour que sa contribution
-  //    en PWM ne dépasse jamais ~220, sinon gros dépassements).
   float err_g = vg_cible - vmes_g_f;
   float err_d = vd_cible - vmes_d_f;
   float imax = 220.0f / fmaxf(KI_V, 1.0f);
@@ -475,8 +353,6 @@ void controlVitesse(float vg_cible, float vd_cible) {
   int pwm_g = vitesseToPWM(vg_cible) + (int)(KP_V * err_g + KI_V * vint_g);
   int pwm_d = vitesseToPWM(vd_cible) + (int)(KP_V * err_d + KI_V * vint_d);
 
-  // 3) KICK anti-friction statique : une roue commandée mais immobile
-  //    reçoit au moins PWM_KICK le temps de décoller.
   if (fabsf(vg_cible) > 0.3f && fabsf(vmes_g_f) < 0.5f) {
     if (pwm_g > 0 && pwm_g <  PWM_KICK) pwm_g =  PWM_KICK;
     if (pwm_g < 0 && pwm_g > -PWM_KICK) pwm_g = -PWM_KICK;
@@ -490,9 +366,7 @@ void controlVitesse(float vg_cible, float vd_cible) {
   ecrirePWMDroit (constrain(pwm_d, -255, 255));
 }
 
-// ═══════════════════════════════════════════════════════════════
 //  IMU LSM6DS3 : configuration et lecture du gyroscope
-// ═══════════════════════════════════════════════════════════════
 void imuWriteReg(uint8_t reg, uint8_t val) {
   Wire.beginTransmission(ADDR_IMU);
   Wire.write(reg); Wire.write(val);
@@ -519,8 +393,6 @@ float lireGyroZ() {
   return ((float)raw * GYRO_SENS_DPS - gyroZbias_dps) * GYRO_Z_SIGN;
 }
 
-// Le bus I2C est initialisé une seule fois dans setup() (Wire.begin),
-// l'IMU et le magnétomètre ne font que leur configuration de registres.
 bool imuInit() {
   uint8_t who = imuReadReg(LSM_WHO_AM_I);
   if (who != 0x69 && who != 0x6A) return false;
@@ -548,28 +420,26 @@ void calibrerGyro(int n) {
   gyroZbias_dps = (float)(somme / n);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Magnétomètre LIS3MDL (chaîne boussole du gregoire)
-// ═══════════════════════════════════════════════════════════════
+// Magnétomètre LIS3MDL
 void initMagnetometer() {
   Wire.beginTransmission(ADDR_MAG);
   Wire.write(0x20);
-  Wire.write(0x90); // Medium performance, 10 Hz
+  Wire.write(0x90);
   Wire.endTransmission();
 
   Wire.beginTransmission(ADDR_MAG);
   Wire.write(0x21);
-  Wire.write(0x00); // ±4 gauss
+  Wire.write(0x00);
   Wire.endTransmission();
 
   Wire.beginTransmission(ADDR_MAG);
   Wire.write(0x22);
-  Wire.write(0x00); // Continuous mode
+  Wire.write(0x00);
   Wire.endTransmission();
 
   Wire.beginTransmission(ADDR_MAG);
   Wire.write(0x23);
-  Wire.write(0x08); // Z high performance
+  Wire.write(0x08);
   Wire.endTransmission();
 
   logMsg("Magnetometre initialise");
@@ -616,7 +486,7 @@ float calculateHeading(int16_t x, int16_t y) {
   return heading;
 }
 
-// Cap par rapport au Nord défini, à partir d'une mesure brute déjà lue.
+
 float headingFromRaw(int16_t x, int16_t y) {
   if (!isValidMagReading(x, y)) return -1.0f;
 
@@ -672,13 +542,12 @@ void calibrateMagnetometer() {
   int16_t x_min = 32767, x_max = -32768;
   int16_t y_min = 32767, y_max = -32768;
 
-  // ⚠ A AJUSTER : 160 avec l'ancien bas niveau ; avec le PWM Michka le
-  // seuil de friction est ~200, on tourne donc un peu au-dessus.
+  
   float rotation_speed = 215.0f;
   unsigned long start_time = millis();
   unsigned long last_sample_time = 0;
 
-  // Rotation pendant 20 s max. Plus robuste que dépendre de theta_robot.
+  
   while (sample_count < max_samples && (millis() - start_time) < 20000) {
     server.handleClient();
     gererTcp();
@@ -713,13 +582,8 @@ void calibrateMagnetometer() {
     mag_offset_x = (float)(x_max + x_min) / 2.0f;
     mag_offset_y = (float)(y_max + y_min) / 2.0f;
 
-    // Comme dans le projet d'origine : la rotation a pollue la pose,
-    // on remet le repere a zero une fois la calibration terminee.
     resetOdometrie();
 
-    // La calibration ne définit pas le Nord : elle calcule seulement les
-    // offsets X/Y. Ensuite : placer le robot vers le vrai Nord puis
-    // cliquer "Définir Nord".
     auto_calibrated = true;
     saveMagCalibration();
     etatRobot = "mag_calibrated_offsets_only";
@@ -738,9 +602,7 @@ void setCurrentAsNorth() {
     logMsg("Impossible de lire le magnetometre pour definir le Nord");
     return;
   }
-
-  // On sauvegarde le cap brut courant comme référence Nord.
-  // getHeadingFromNorth() appliquera ensuite la correction Est/Ouest.
+  
   magnetic_north_angle = calculateHeading(x, y);
   auto_calibrated = true;
   saveMagCalibration();
@@ -777,7 +639,6 @@ void faceNorth() {
       continue;
     }
 
-    // Erreur courte vers 0° : plage -180° à +180°.
     float error = 0.0f - current;
     if (error > 180.0f) error -= 360.0f;
     if (error < -180.0f) error += 360.0f;
@@ -792,13 +653,8 @@ void faceNorth() {
 
     stableCount = 0;
 
-    // ⚠ A AJUSTER : avec le bas niveau Michka, en dessous de ~200 de PWM
-    // le robot ne tourne pas (plancher appliqué par setMoteurs de toute
-    // façon). Plage volontairement resserrée juste au-dessus du seuil.
     float turn_speed = constrain(fabs(error) * 1.5f, 205.0f, 235.0f);
 
-    // Si le robot part du mauvais côté, inverser simplement les deux
-    // lignes suivantes.
     if (error > 0.0f) {
       setMoteurs(turn_speed, -turn_speed);
     } else {
@@ -822,11 +678,7 @@ void faceNorth() {
   logMsg("Orientation Nord terminee. Cap=" + String(final_heading, 1) + " deg");
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Odométrie (carte de l'interface HTML) — constantes Michka
-// ═══════════════════════════════════════════════════════════════
-// Tourne en permanence dans loop(), quel que soit le mode de mouvement :
-// la carte trace donc aussi l'escalier et le cercle (séquences Michka).
+// Odométrie (carte de l'interface HTML)
 void mettreAJourOdometrie() {
   long currentG, currentD;
   copyTicks(currentD, currentG);
@@ -859,9 +711,7 @@ void mettreAJourOdometrie() {
   theta_robot = normaliserAngle(theta_robot + dTheta);
 }
 
-// Remise à zéro du repère : stylo en (0,0), orientation 0.
-// Arrête aussi tout mouvement en cours (les cibles Michka sont relatives
-// aux compteurs, on ne remet pas les ticks à zéro pendant un mouvement).
+
 void resetOdometrie() {
   motionMode = MODE_IDLE;
   escalierPending = false;
@@ -882,12 +732,7 @@ void resetOdometrie() {
   logMsg("Reset : stylo en (0,0)");
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Mouvements asservis Michka
-// ═══════════════════════════════════════════════════════════════
-// Démarrage d'un mouvement asservi en ticks (F/B).
-// Cibles RELATIVES : on mémorise les compteurs au départ au lieu de les
-// remettre à zéro, pour ne pas perturber l'odométrie de la carte.
+// Mouvements asservis
 void startMouvement(int dirD, int dirG, unsigned long ticks) {
   copyTicks(tick_ref_D, tick_ref_G);
   tick_dir_D = (dirD >= 0) ? 1 : -1;
@@ -913,18 +758,15 @@ void startTurnGyro(float deg) {
   etatRobot = "turn_gyro";
 }
 
-// ---------- Séquence 1 : escalier, tractrice originale, Vp ~ 5 cm/s ----------
-// Géométrie validée en simulation (déviation max < 0.5 mm). Avec
-// l'asservissement de vitesse, ces valeurs lentes sont exécutables :
-// le PI monte le PWM jusqu'à ce que la roue tourne VRAIMENT à la consigne.
+// ---------- Séquence 1 : escalier ----------
 static const CmdV ESCALIER[] = {
-  // virage gauche (90 deg, le stylo trace l'angle, le châssis pivote)
+  // virage gauche
   {-1.69f, 2.00f, 110}, {-1.37f, 2.31f, 110}, {-1.05f, 2.61f, 110},
   {-0.72f, 2.91f, 120}, {-0.39f, 3.20f, 120}, {-0.07f, 3.47f, 120},
   { 0.26f, 3.74f, 120}, { 0.59f, 4.00f, 120}, { 0.92f, 4.25f, 130},
   { 1.24f, 4.49f, 130}, { 1.56f, 4.71f, 130}, { 1.88f, 4.92f, 140},
   { 2.19f, 5.12f, 140}, { 2.49f, 5.30f, 100},
-  // pause : consigne 0 = freinage asservi (le PI ramène les roues à 0)
+  // pause
   { 0.00f, 0.00f, 200},
   // virage droit + segment de 40 cm
   { 4.79f, 2.77f, 200}, { 4.92f, 3.06f, 200}, { 5.00f, 3.27f, 200},
@@ -944,11 +786,7 @@ static const CmdV ESCALIER[] = {
 };
 const int N_ESCALIER = sizeof(ESCALIER) / sizeof(ESCALIER[0]);
 
-// ---------- Séquence 3 : flèche Nord, profil de vitesses relevé ----------
-// Même principe que l'escalier : chaque palier {vG, vD, durée} est suivi
-// en boucle fermée par le PI de vitesse. Séquence validée expérimentalement
-// (tige, pointe, remplissage du triangle), jouée APRÈS l'alignement Nord.
-// Durées du format texte V (secondes) converties en ms. Durée totale ~37 s.
+// ---------- Séquence 3 : flèche Nord ----------
 static const CmdV FLECHE[] = {
   {  6.00f,   6.00f, 1880}, {  4.50f,   4.50f,   40}, {  3.50f,   3.50f,   80},
   {  2.00f,   2.00f,   80}, {  1.00f,   1.00f,   80}, { -1.75f,   2.00f,  360},
@@ -1027,39 +865,33 @@ static const CmdV FLECHE[] = {
 };
 const int N_FLECHE = sizeof(FLECHE) / sizeof(FLECHE[0]);
 
-// ---------- Séquence 2 : cercle dynamique (cinématique inverse) ----------
+// ---------- Séquence 2 : cercle dynamique ----------
 #define N_CERCLE 40
-CmdV CERCLE_BUFFER[N_CERCLE]; // Buffer global pour la séquence générée
-
+CmdV CERCLE_BUFFER[N_CERCLE];
 void genererCercle(float Rc) {
-  float d = OFFSET_STYLO_M * 100.0f;  // offset du stylo (cm) : 13 cm
-  float e = TRACK_WIDTH_CM;           // entraxe des roues (cm)
-  float T = 10.0f;                    // temps total pour faire le cercle (s)
+  float d = OFFSET_STYLO_M * 100.0f;
+  float e = TRACK_WIDTH_CM;
+  float T = 10.0f;
   float dt = T / (float)N_CERCLE;
 
-  float theta = PI / 2.0f;   // repère interne du calcul (robot "vers le haut")
+  float theta = PI / 2.0f;
 
   for (int i = 0; i < N_CERCLE; i++) {
     float t = i * dt;
 
-    // 1. Vitesse du stylo requise (vitesses tangentielles)
     float vpx = -(2.0f * PI * Rc / T) * sin(2.0f * PI * t / T);
     float vpy =  (2.0f * PI * Rc / T) * cos(2.0f * PI * t / T);
 
-    // 2. Cinématique inverse (compense l'offset du stylo)
     float v = vpx * cos(theta) + vpy * sin(theta);
     float w = (-vpx * sin(theta) + vpy * cos(theta)) / d;
 
-    // 3. Calcul des vitesses de roues
     float wg = v - (e * w) / 2.0f;
     float wd = v + (e * w) / 2.0f;
 
-    // 4. Enregistrement dans le buffer
     CERCLE_BUFFER[i].vg = wg;
     CERCLE_BUFFER[i].vd = wd;
     CERCLE_BUFFER[i].dur_ms = (int)(dt * 1000.0f);
 
-    // Mise à jour de l'orientation virtuelle
     theta += w * dt;
   }
 }
@@ -1070,7 +902,7 @@ void startVSeq(const CmdV* seq, int len) {
   vseq_idx = 0;
   vseq_step_start = millis();
   estModeFlecheNord = false;
-  resetVitessePI();              // repart d'un état propre (intégrale, mesure)
+  resetVitessePI();
   motionMode = MODE_VSEQ;
 }
 
@@ -1085,7 +917,7 @@ void controlVSeq() {
     return;
   }
   const CmdV& s = vseq_ptr[vseq_idx];
-  controlVitesse(s.vg, s.vd);    // boucle FERMÉE : la vitesse réelle suit la consigne
+  controlVitesse(s.vg, s.vd);
   if (millis() - vseq_step_start >= (unsigned long)s.dur_ms) {
     vseq_idx++;
     vseq_step_start = millis();
@@ -1102,8 +934,8 @@ void controlTicks() {
   long errD = tick_target - td;
 
   if (errG <= TOL_TICKS && errD <= TOL_TICKS) {
-    brakeMoteurs();   // arrêt net au coin : la tractrice repart de l'arrêt
-                      // (le PI + kick gère le redémarrage, plus besoin d'élan)
+    brakeMoteurs();
+    
     if (escalierPending) {
       escalierPending = false;
       logMsg(">> SEQ:1 20cm OK -> tractrice");
@@ -1180,9 +1012,8 @@ void controlTurnGyro() {
   setMoteurGauche(-cmd);
 }
 
-// ---------- Lancement des séquences (partagé HTML + Tkinter) ----------
+// ---------- Lancement des séquences----------
 void lancerSeq1() {
-  // Séquence 1 : escalier (20 cm asservi en ticks puis tractrice)
   seq2Active = false;
   unsigned long ticks = (unsigned long)(20.0f / WHEEL_CIRCUM_CM * TICKS_PER_REV);
   startMouvement(+1, +1, ticks);
@@ -1192,7 +1023,6 @@ void lancerSeq1() {
 }
 
 void lancerSeq2(float rayon) {
-  // Séquence 2 : cercle dynamique, rayon paramétrable (2 à 20 cm)
   rayon = constrain(rayon, 2.0f, 20.0f);
   rayonCercle = rayon;
   seq2Active = true;
@@ -1202,8 +1032,7 @@ void lancerSeq2(float rayon) {
   logMsg(">> SEQ:2 cercle dynamique (Rayon=" + String(rayon) + "cm)");
 }
 
-// Arrêt général : coupe les modes Michka, la flèche Nord et les boucles
-// bloquantes (faceNorth, calibration magnétomètre).
+// Arrêt général
 void stopTout() {
   motionMode = MODE_IDLE;
   escalierPending = false;
@@ -1215,15 +1044,8 @@ void stopTout() {
   logMsg(">> Stop");
 }
 
-// ═══════════════════════════════════════════════════════════════
 // Flèche Nord (séquence 3)
-// ═══════════════════════════════════════════════════════════════
-// 1) Alignement sur le Nord magnétique (faceNorth, bloquant, interruptible)
-// 2) Remise à zéro du repère : stylo en (0,0), axe x = direction Nord
-// 3) Lecture de la séquence de vitesses FLECHE en boucle fermée (MODE_VSEQ),
-//    exactement comme la tractrice de l'escalier.
 void drawNorthArrowFixed() {
-  // Étape 0 : on coupe tout mouvement en cours.
   motionMode = MODE_IDLE;
   escalierPending = false;
   seq2Active = false;
@@ -1238,25 +1060,17 @@ void drawNorthArrowFixed() {
 
   logMsg("Fleche Nord : alignement a 0 deg...");
 
-  // Étape 1 : alignement Nord (bloquant, interruptible par Stop).
   faceNorth();
   if (stopRequested) return;
 
-  // Étape 2 : une fois aligné, on redéfinit le repère local pour la carte :
-  // stylo en (0,0), x positif = axe Nord.
   resetOdometrie();
 
-  // Étape 3 : le tracé est une séquence de vitesses asservies (tige,
-  // pointe, remplissage), suivie par le PI de vitesse de chaque roue.
   startVSeq(FLECHE, N_FLECHE);
-  estModeFlecheNord = true;   // flag d'affichage pour /data
+  estModeFlecheNord = true;
   etatRobot = "north_arrow_running";
   logMsg(">> Fleche Nord : sequence V lancee (" + String(N_FLECHE) + " paliers)");
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Protocole texte (TCP / USB) — compatible avec l'interface Tkinter
-// ═══════════════════════════════════════════════════════════════
 void traiterCommande(const String& cmd) {
   digitalWrite(LEDU2, !digitalRead(LEDU2));
 
@@ -1297,7 +1111,6 @@ void traiterCommande(const String& cmd) {
     }
 
   } else if (cmd.startsWith("V:")) {
-    // Vitesse roue indépendante, ASSERVIE : V:vG:vD:duree_ms
     String s = cmd.substring(2);
     int c1 = s.indexOf(':');
     int c2 = s.indexOf(':', c1 + 1);
@@ -1316,11 +1129,10 @@ void traiterCommande(const String& cmd) {
     }
 
   } else if (cmd.startsWith("SEQ:")) {
-    // Format attendu : SEQ:num ou SEQ:num:rayon
     String s = cmd.substring(4);
     int idx = s.indexOf(':');
     int n = 0;
-    float rayon = 2.0f; // rayon par défaut si non spécifié
+    float rayon = 2.0f;
 
     if (idx > 0) {
       n = s.substring(0, idx).toInt();
@@ -1346,7 +1158,6 @@ void traiterCommande(const String& cmd) {
     envoyer("Enc G=" + String(g) + " Enc D=" + String(d));
 
   } else if (cmd == "W" || cmd == "w") {
-    // Vitesses mesurées (mises à jour pendant une séquence V uniquement)
     envoyer("Vmes G=" + String(vmes_g_f, 2) + " D=" + String(vmes_d_f, 2) + " cm/s");
 
   } else if (cmd == "G" || cmd == "g") {
@@ -1354,7 +1165,6 @@ void traiterCommande(const String& cmd) {
             String(gyro_angle_deg, 2) + " deg | imu=" + String(imuOk ? 1 : 0));
 
   } else if (cmd == "M" || cmd == "m") {
-    // Lecture magnétomètre (debug)
     int16_t mx, my, mz;
     bool ok = readRawMagnetometer(mx, my, mz);
     envoyer("Mag x=" + String(mx) + " y=" + String(my) + " z=" + String(mz) +
@@ -1384,7 +1194,6 @@ void traiterCommande(const String& cmd) {
     }
 
   } else if (cmd.startsWith("PIDV:")) {
-    // Réglage en direct du PI de vitesse : "PIDV:kp,ki"
     String s = cmd.substring(5);
     int c1 = s.indexOf(',');
     if (c1 > 0) {
@@ -1400,9 +1209,7 @@ void traiterCommande(const String& cmd) {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// HTTP / API (interface HTML)
-// ═══════════════════════════════════════════════════════════════
+// HTTP / API
 String jsonEscape(String s) {
   s.replace("\\", "\\\\");
   s.replace("\"", "\\\"");
@@ -1439,7 +1246,6 @@ void handleData() {
   bool magOk = readRawMagnetometer(mx, my, mz);
   float heading = magOk ? headingFromRaw(mx, my) : -1.0f;
 
-  // Avancement de la séquence V en cours (escalier, cercle ou flèche)
   int pt = 0, pts = 0;
   if (motionMode == MODE_VSEQ) {
     pt = vseq_idx + 1;
@@ -1523,7 +1329,6 @@ void handleManual() {
   int speed = server.hasArg("speed") ? server.arg("speed").toInt() : 220;
   speed = constrain(speed, 0, 255);
 
-  // Le mode manuel coupe toute séquence en cours.
   motionMode = MODE_IDLE;
   escalierPending = false;
   seq2Active = false;
@@ -1545,8 +1350,6 @@ void handleManual() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
-// Lecture (et réglage optionnel via paramètres GET) de tous les gains.
-// Le panneau PID du HTML ne fait que LIRE ces valeurs.
 void handlePID() {
   if (server.hasArg("kp_turn")) KP_TURN = server.arg("kp_turn").toFloat();
   if (server.hasArg("ki_turn")) KI_TURN = server.arg("ki_turn").toFloat();
@@ -1564,16 +1367,12 @@ void handlePID() {
   server.send(200, "application/json", j);
 }
 
-// ═══════════════════════════════════════════════════════════════
 // Entrées console : TCP (Tkinter) et USB (debug)
-// ═══════════════════════════════════════════════════════════════
 void gererTcp() {
-  // Acceptation d'un client TCP (un seul à la fois)
   if (!tcpClient || !tcpClient.connected()) {
     tcpClient = tcpServer.accept();
     if (tcpClient) Serial.println("Client TCP connecte : " + tcpClient.remoteIP().toString());
   }
-  // Commandes via WiFi (protocole texte Tkinter)
   if (tcpClient && tcpClient.connected() && tcpClient.available()) {
     String cmd = tcpClient.readStringUntil('\n');
     cmd.trim();
@@ -1589,15 +1388,11 @@ void gererSerial() {
   }
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Setup
-// ═══════════════════════════════════════════════════════════════
 void setup() {
-  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);  // piles faibles : pas de reset brown-out
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
   Serial.begin(115200);
   delay(200);
 
-  // --- GPIO / PWM / encodeurs (schéma Michka) ---
   pinMode(EN_D, OUTPUT); digitalWrite(EN_D, HIGH);
   pinMode(EN_G, OUTPUT); digitalWrite(EN_G, HIGH);
   pinMode(LEDU1, OUTPUT); digitalWrite(LEDU1, LOW);
@@ -1617,11 +1412,9 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(ENC_G_CH_A), isr_enc_g, RISING);
   attachInterrupt(digitalPinToInterrupt(ENC_D_CH_A), isr_enc_d, RISING);
 
-  // --- I2C : un seul begin pour l'IMU ET le magnétomètre ---
   Wire.begin(PIN_SDA, PIN_SCL);
   Wire.setClock(400000);
 
-  // --- EEPROM + magnétomètre ---
   EEPROM.begin(EEPROM_SIZE);
   initMagnetometer();
   if (loadMagCalibration()) {
@@ -1630,7 +1423,6 @@ void setup() {
     Serial.println("Pas de calibration magnetometre en EEPROM");
   }
 
-  // --- IMU (gyroscope) ---
   imuOk = imuInit();
   if (imuOk) {
     Serial.println("IMU LSM6DS3 OK - calibration du gyro (NE PAS BOUGER le robot)...");
@@ -1640,14 +1432,11 @@ void setup() {
     Serial.println("IMU non detectee - virages en repli ENCODEUR.");
   }
 
-  // --- LittleFS (sert l'interface HTML) ---
   if (!LittleFS.begin(true)) {
     Serial.println("Erreur LittleFS : index.html indisponible (pio run -t uploadfs ?)");
   }
 
-  // --- WiFi : AP + STA simultanés ---
-  // AP  : toujours dispo (soutenance), reseau "Drawbot" -> http://192.168.4.1
-  // STA : rejoint le reseau local en arriere-plan, sans bloquer le demarrage
+  //http://192.168.4.1
   WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(AP_SSID, AP_PASS);
   if (strlen(STA_PASS) > 0) WiFi.begin(STA_SSID, STA_PASS);
@@ -1655,7 +1444,6 @@ void setup() {
   Serial.println("AP \"" + String(AP_SSID) + "\" -> http://" + WiFi.softAPIP().toString());
   Serial.println("Connexion a \"" + String(STA_SSID) + "\" en arriere-plan...");
 
-  // --- Serveur HTTP (interface HTML) ---
   server.on("/", handleIndex);
   server.on("/data", handleData);
   server.on("/cmd", handleCommand);
@@ -1673,7 +1461,6 @@ void setup() {
   });
   server.begin();
 
-  // --- Serveur TCP (interface Tkinter) ---
   tcpServer.begin();
 
   stopMoteurs();
@@ -1684,20 +1471,13 @@ void setup() {
   Serial.println("Drawbot pret : HTTP :80 (HTML) + TCP :8266 (Tkinter)");
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Boucle principale
-// ═══════════════════════════════════════════════════════════════
 void loop() {
-  // Interfaces : HTML (HTTP), Tkinter (TCP), debug (USB)
   server.handleClient();
   gererTcp();
   gererSerial();
 
-  // Odométrie en continu : la carte du HTML trace TOUS les mouvements,
-  // y compris l'escalier et le cercle (séquences Michka).
   mettreAJourOdometrie();
 
-  // Boucle de contrôle Michka, cadencée à 100 Hz
   static unsigned long dernierControle = 0;
   if (motionMode != MODE_IDLE && millis() - dernierControle >= CONTROL_PERIOD_MS) {
     dernierControle = millis();
@@ -1706,7 +1486,6 @@ void loop() {
     else if (motionMode == MODE_VSEQ)  controlVSeq();
   }
 
-  // Annonce de l'IP locale quand la connexion STA aboutit
   static bool staAnnonce = false;
   if (WiFi.status() == WL_CONNECTED && !staAnnonce) {
     staAnnonce = true;
