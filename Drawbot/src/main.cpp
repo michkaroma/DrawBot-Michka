@@ -10,7 +10,7 @@
 
 /*
   ═══════════════════════════════════════════════════════════════
-  DRAWBOT — Firmware unifié (fusion projets "Michka" + "Gregoire")
+  DRAWBOT — Firmware unifié (fusion projets "Michka" + "gregoire")
   ═══════════════════════════════════════════════════════════════
 
   Repris du projet MICHKA (référence pour tout ce qui touche au robot) :
@@ -23,16 +23,19 @@
   - IMU LSM6DS3 (gyroscope) + calibration du biais
   - Protocole TCP texte (port 8266) -> l'interface Tkinter reste compatible
 
-  Repris du projet Gregoire :
+  Repris du projet gregoire :
   - WiFi + serveur HTTP (port 80) + interface HTML servie par LittleFS
   - Odométrie x / y / theta + position du feutre (alimente la carte du HTML)
   - Magnétomètre LIS3MDL : calibration, sauvegarde EEPROM, Définir Nord,
-    Orienter Nord, flèche Nord (navigation multi-points PID dist + angle)
+    Orienter Nord, flèche Nord (alignement magnéto puis séquence de
+    vitesses asservies relevée expérimentalement, comme l'escalier)
   - Routes /data, /cmd, /manual, /pid
 
   Supprimé (doublons devenus inutiles) :
-  - Escalier "3 points de passage" et cercle par waypoints du Gregoire
+  - Escalier "3 points de passage" et cercle par waypoints du gregoire
     (remplacés par les séquences Michka)
+  - Navigation multi-points PID (waypoints + odométrie) : la flèche Nord
+    est désormais une séquence de vitesses asservies (table FLECHE)
 
   WiFi : mode AP + STA simultané.
   - AP  : réseau "Drawbot" (mdp 12345678), interface sur http://192.168.4.1
@@ -42,8 +45,7 @@
     à téléverser avec  pio run -t uploadfs.
     Ajouter dans platformio.ini :  board_build.filesystem = littlefs
 
-  ⚠ À RE-RÉGLER sur le robot (hérités du Gregoire, le bas niveau a changé) :
-    - gains PID distance/angle de la flèche Nord (KP_DIST..., KP_ANGLE...)
+  ⚠ À RE-RÉGLER sur le robot (hérité du gregoire, le bas niveau a changé) :
     - vitesses de rotation de faceNorth() et calibrateMagnetometer()
 */
 
@@ -154,7 +156,7 @@ float KD_TURN = 0.20f;
 #define TURN_TIMEOUT_MS 8000
 
 // ═══════════════════════════════════════════════════════════════
-// Magnétomètre LIS3MDL — Gregoire
+// Magnétomètre LIS3MDL — gregoire
 // ═══════════════════════════════════════════════════════════════
 #define ADDR_MAG 0x1E
 #define EEPROM_SIZE 64
@@ -171,50 +173,13 @@ int16_t mag_z_raw = 0;
 float   mag_heading = -1.0f;
 
 // ═══════════════════════════════════════════════════════════════
-// Navigation flèche Nord (PID distance + angle) — Gregoire
-// ⚠ Gains hérités du Gregoire : à re-régler avec le bas niveau Michka.
+// Flèche Nord — flag d'affichage (/data). Le tracé lui-même est la
+// séquence de vitesses FLECHE (définie avec l'ESCALIER plus bas).
 // ═══════════════════════════════════════════════════════════════
-#define MAX_POINTS 160
-
-float VITESSE_MAX = 240.0f;
-float VITESSE_MIN = 200.0f;        // = seuil de friction du bas niveau Michka
-float DISTANCE_TOLERANCE = 0.012f; // m
-float ANGLE_TOLERANCE = 0.05f;     // rad
-
-float KP_DIST = 900.0f;
-float KI_DIST = 50.0f;
-float KD_DIST = 150.0f;
-
-float KP_ANGLE = 145.0f;
-float KI_ANGLE = 15.0f;
-float KD_ANGLE = 40.0f;
-
-float erreurDist_precedente = 0.0f;
-float integrale_dist = 0.0f;
-float erreurAngle_precedente = 0.0f;
-float integrale_angle = 0.0f;
-unsigned long temps_precedent = 0;
-
-struct Point {
-  float x;
-  float y;
-};
-
-Point PARCOURS[MAX_POINTS];
-int  NB_POINTS = 0;
-int  pointActuel = 0;
-bool parcoursCharge = false;
-bool parcoursFini = false;
-bool objectifAtteint = false;
 bool estModeFlecheNord = false;
-unsigned long tempsArrivePoint = 0;
-const unsigned long PAUSE_ENTRE_POINTS = 1000;
-
-float vG_prev = 0.0f;
-float vD_prev = 0.0f;
 
 // ═══════════════════════════════════════════════════════════════
-// Odométrie — Gregoire (mais avec les constantes Michka)
+// Odométrie — gregoire (mais avec les constantes Michka)
 // ═══════════════════════════════════════════════════════════════
 // Convention encodeurs : marche AVANT = ticks POSITIFS pour les deux
 // roues (le câblage inversé de la roue gauche est corrigé dans l'ISR).
@@ -313,7 +278,7 @@ void   calibrateMagnetometer();
 void   setCurrentAsNorth();
 void   faceNorth();
 void   mettreAJourOdometrie();
-void   resetParcours();
+void   resetOdometrie();
 void   startMouvement(int dirD, int dirG, unsigned long ticks);
 void   startTurnGyro(float deg);
 void   genererCercle(float Rc);
@@ -324,11 +289,7 @@ void   controlTurnGyro();
 void   lancerSeq1();
 void   lancerSeq2(float rayon);
 void   stopTout();
-float  calculerPID_Distance(float erreur, float dt);
-float  calculerPID_Angle(float erreur, float dt);
-void   loadNorthArrowSimplePath();
 void   drawNorthArrowFixed();
-void   navigationMultiPoints();
 void   traiterCommande(const String& cmd);
 void   gererTcp();
 void   gererSerial();
@@ -446,7 +407,7 @@ void setMoteurGauche(int vitesse) {
   ecrirePWMGauche(vitesse);
 }
 
-// Wrapper pour le code hérité du Gregoire (navigation flèche Nord, faceNorth,
+// Wrapper pour le code hérité du gregoire (navigation flèche Nord, faceNorth,
 // calibration magnétomètre, mode manuel) qui travaille en float.
 void setMoteurs(float vitesseGauche, float vitesseDroite) {
   setMoteurGauche((int)vitesseGauche);
@@ -588,7 +549,7 @@ void calibrerGyro(int n) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Magnétomètre LIS3MDL (chaîne boussole du Gregoire)
+// Magnétomètre LIS3MDL (chaîne boussole du gregoire)
 // ═══════════════════════════════════════════════════════════════
 void initMagnetometer() {
   Wire.beginTransmission(ADDR_MAG);
@@ -754,7 +715,7 @@ void calibrateMagnetometer() {
 
     // Comme dans le projet d'origine : la rotation a pollue la pose,
     // on remet le repere a zero une fois la calibration terminee.
-    resetParcours();
+    resetOdometrie();
 
     // La calibration ne définit pas le Nord : elle calcule seulement les
     // offsets X/Y. Ensuite : placer le robot vers le vrai Nord puis
@@ -901,9 +862,10 @@ void mettreAJourOdometrie() {
 // Remise à zéro du repère : stylo en (0,0), orientation 0.
 // Arrête aussi tout mouvement en cours (les cibles Michka sont relatives
 // aux compteurs, on ne remet pas les ticks à zéro pendant un mouvement).
-void resetParcours() {
+void resetOdometrie() {
   motionMode = MODE_IDLE;
   escalierPending = false;
+  estModeFlecheNord = false;
 
   noInterrupts();
   ticksG = 0;
@@ -915,19 +877,6 @@ void resetParcours() {
   x_robot = -OFFSET_STYLO_M;
   y_robot = 0.0;
   theta_robot = 0.0;
-
-  pointActuel = 0;
-  objectifAtteint = false;
-  parcoursFini = false;
-  estModeFlecheNord = false;
-
-  integrale_dist = 0.0f;
-  integrale_angle = 0.0f;
-  erreurDist_precedente = 0.0f;
-  erreurAngle_precedente = 0.0f;
-
-  vG_prev = 0.0f;
-  vD_prev = 0.0f;
 
   etatRobot = "reset";
   logMsg("Reset : stylo en (0,0)");
@@ -945,7 +894,6 @@ void startMouvement(int dirD, int dirG, unsigned long ticks) {
   tick_dir_G = (dirG >= 0) ? 1 : -1;
   tick_target = (long)ticks;
   escalierPending = false;
-  parcoursCharge = false;          // coupe une éventuelle flèche Nord
   estModeFlecheNord = false;
   motionMode = MODE_TICKS;
   etatRobot = "move_ticks";
@@ -960,7 +908,6 @@ void startTurnGyro(float deg) {
   turn_last_us    = micros();
   turn_start_ms   = millis();
   escalierPending = false;
-  parcoursCharge  = false;
   estModeFlecheNord = false;
   motionMode      = MODE_TURN;
   etatRobot = "turn_gyro";
@@ -996,6 +943,89 @@ static const CmdV ESCALIER[] = {
   { 5.05f, 4.94f, 200},
 };
 const int N_ESCALIER = sizeof(ESCALIER) / sizeof(ESCALIER[0]);
+
+// ---------- Séquence 3 : flèche Nord, profil de vitesses relevé ----------
+// Même principe que l'escalier : chaque palier {vG, vD, durée} est suivi
+// en boucle fermée par le PI de vitesse. Séquence validée expérimentalement
+// (tige, pointe, remplissage du triangle), jouée APRÈS l'alignement Nord.
+// Durées du format texte V (secondes) converties en ms. Durée totale ~37 s.
+static const CmdV FLECHE[] = {
+  {  6.00f,   6.00f, 1880}, {  4.50f,   4.50f,   40}, {  3.50f,   3.50f,   80},
+  {  2.00f,   2.00f,   80}, {  1.00f,   1.00f,   80}, { -1.75f,   2.00f,  360},
+  { -1.00f,   3.00f,  200}, {  0.00f,   3.75f,  200}, {  0.75f,   2.75f,   80},
+  {  0.75f,   1.75f,  160}, {  5.25f,   2.00f,  400}, {  5.50f,   2.75f,  320},
+  {  6.00f,   3.50f,  360}, {  6.25f,   4.50f,  360}, {  5.50f,   4.25f,   40},
+  {  4.25f,   3.50f,   40}, {  3.25f,   2.75f,   80}, {  2.00f,   1.75f,   80},
+  {  1.00f,   1.00f,   40}, { -3.75f,  -6.00f,  480}, { -3.00f,  -5.75f,  320},
+  { -2.25f,  -5.25f,  240}, { -1.50f,  -4.75f,  200}, { -0.75f,  -4.25f,  160},
+  {  0.25f,  -3.75f,   80}, {  0.50f,  -2.25f,   80}, {  0.50f,  -1.00f,  120},
+  { -1.00f,   0.00f,  280}, { -0.25f,   0.50f,   80}, {  0.75f,   1.50f,  200},
+  { -2.25f,  -1.25f,  160}, { -1.25f,  -1.00f,  120}, {  3.00f,   4.50f,  120},
+  {  2.25f,   3.00f,   80}, {  1.50f,   1.75f,  160}, { -5.00f,  -5.00f,  120},
+  { -3.50f,  -3.75f,   80}, { -2.25f,  -2.25f,   80}, { -1.25f,  -1.25f,   80},
+  {  4.25f,   6.25f,  160}, {  3.75f,   5.25f,   40}, {  3.25f,   4.25f,   40},
+  {  2.50f,   3.25f,   80}, {  1.50f,   2.00f,   80}, {  0.75f,   1.00f,   80},
+  { -5.50f,  -6.25f,  200}, { -4.25f,  -4.75f,   40}, { -3.25f,  -3.75f,   40},
+  { -2.50f,  -2.75f,   80}, { -1.25f,  -1.50f,  120}, {  4.50f,   6.25f,  320},
+  {  3.75f,   4.75f,   40}, {  3.00f,   3.75f,   40}, {  2.25f,   3.00f,   80},
+  {  1.25f,   1.50f,  120}, { -5.50f,  -6.25f,  320}, { -4.25f,  -5.00f,   40},
+  { -3.25f,  -4.00f,   40}, { -2.50f,  -3.25f,   40}, { -2.00f,  -2.50f,   80},
+  { -1.00f,  -1.25f,   80}, {  4.50f,   6.25f,  440}, {  4.50f,   5.25f,   40},
+  {  3.75f,   4.00f,   40}, {  3.00f,   3.25f,   40}, {  2.25f,   2.50f,   80},
+  {  1.25f,   1.25f,  120}, { -5.50f,  -6.25f,  440}, { -4.50f,  -5.50f,   40},
+  { -3.75f,  -4.50f,   40}, { -2.75f,  -3.50f,   40}, { -2.25f,  -2.75f,   80},
+  { -1.00f,  -1.50f,   80}, {  4.75f,   6.25f,  600}, {  4.00f,   4.50f,   40},
+  {  3.25f,   3.50f,   40}, {  2.50f,   2.50f,   80}, {  1.50f,   1.50f,  120},
+  { -5.50f,  -6.25f,  600}, { -4.00f,  -4.75f,   40}, { -3.25f,  -3.75f,   40},
+  { -2.50f,  -2.75f,   80}, { -1.25f,  -1.50f,  120}, {  5.00f,   6.25f,  720},
+  {  4.75f,   5.00f,   40}, {  3.75f,   4.00f,   40}, {  3.00f,   3.00f,   80},
+  {  1.75f,   1.75f,  120}, { -5.75f,  -6.25f,  720}, { -4.00f,  -5.00f,   40},
+  { -3.00f,  -4.00f,   40}, { -2.25f,  -3.00f,   80}, { -1.25f,  -1.50f,  120},
+  {  5.25f,   6.25f,  840}, {  4.75f,   5.50f,   40}, {  4.00f,   4.25f,   40},
+  {  3.00f,   3.25f,   80}, {  1.75f,   1.75f,  120}, { -5.75f,  -6.25f,  840},
+  { -4.50f,  -5.00f,   40}, { -3.50f,  -4.00f,   40}, { -2.75f,  -3.00f,   80},
+  { -1.50f,  -1.75f,  120}, {  5.25f,   6.25f,  920}, {  6.00f,   6.00f,   80},
+  {  5.00f,   4.50f,   40}, {  4.00f,   3.50f,   40}, {  3.00f,   2.75f,   80},
+  {  1.75f,   1.50f,  120}, { -5.75f,  -6.25f,  960}, { -5.25f,  -5.50f,   40},
+  { -4.25f,  -4.25f,   40}, { -3.25f,  -3.50f,   40}, { -2.50f,  -2.50f,   80},
+  { -1.25f,  -1.50f,  120}, {  5.50f,   6.25f, 1120}, {  4.75f,   4.75f,   40},
+  {  3.75f,   3.75f,   40}, {  3.00f,   3.00f,   40}, {  2.25f,   2.25f,   80},
+  {  1.25f,   1.00f,   80}, { -5.75f,  -6.00f, 1120}, { -4.75f,  -5.25f,   40},
+  { -3.75f,  -4.25f,   40}, { -3.00f,  -3.25f,   80}, { -1.75f,  -1.75f,   80},
+  { -0.75f,  -1.00f,   80}, {  5.50f,   6.25f,  960}, {  6.00f,   5.25f,   40},
+  {  5.00f,   4.00f,   40}, {  4.00f,   3.25f,   40}, {  3.00f,   2.50f,   80},
+  {  1.75f,   1.25f,  120}, { -6.00f,  -6.00f,  960}, { -5.00f,  -5.75f,   40},
+  { -4.00f,  -4.75f,   40}, { -3.25f,  -3.75f,   40}, { -2.50f,  -3.00f,   40},
+  { -1.75f,  -2.25f,   80}, { -1.00f,  -1.00f,   80}, {  5.75f,   6.25f,  840},
+  {  4.75f,   4.75f,   40}, {  3.75f,   3.50f,   80}, {  2.25f,   2.00f,   80},
+  {  1.25f,   1.00f,   80}, { -6.00f,  -6.00f,  840}, { -5.00f,  -5.00f,   40},
+  { -4.00f,  -4.00f,   40}, { -3.25f,  -3.00f,   40}, { -2.50f,  -2.25f,   80},
+  { -1.25f,  -1.25f,  120}, {  5.75f,   6.00f,  720}, {  5.00f,   5.00f,   40},
+  {  4.00f,   4.00f,   40}, {  3.00f,   3.25f,   40}, {  2.25f,   2.50f,   80},
+  {  1.25f,   1.25f,  120}, { -6.00f,  -6.00f,  720}, { -5.00f,  -4.50f,   40},
+  { -4.00f,  -3.50f,   40}, { -3.25f,  -2.75f,   40}, { -2.50f,  -2.00f,   80},
+  { -1.25f,  -1.00f,   80}, {  6.00f,   6.00f,  560}, {  5.00f,   5.50f,   40},
+  {  4.00f,   4.50f,   40}, {  3.00f,   3.50f,   40}, {  2.25f,   2.75f,   80},
+  {  1.25f,   1.50f,  120}, { -6.25f,  -5.75f,  600}, { -4.50f,  -4.25f,   40},
+  { -3.50f,  -3.25f,   40}, { -2.50f,  -2.50f,   80}, { -1.25f,  -1.25f,  120},
+  {  6.00f,   6.00f,  440}, {  5.00f,   4.75f,   40}, {  4.00f,   3.75f,   40},
+  {  3.25f,   3.00f,   40}, {  2.50f,   2.25f,   80}, {  1.25f,   1.25f,   80},
+  { -6.25f,  -5.50f,  440}, { -5.25f,  -4.75f,   40}, { -4.25f,  -3.75f,   40},
+  { -3.25f,  -3.00f,   40}, { -2.50f,  -2.25f,   80}, { -1.25f,  -1.25f,   80},
+  {  6.00f,   6.00f,  320}, {  4.75f,   4.25f,   40}, {  3.75f,   3.25f,   40},
+  {  2.75f,   2.50f,   80}, {  1.50f,   1.25f,  120}, { -6.25f,  -5.25f,  320},
+  { -5.25f,  -4.25f,   40}, { -4.00f,  -3.50f,   40}, { -3.25f,  -2.75f,   40},
+  { -2.50f,  -2.00f,   80}, { -1.25f,  -1.00f,   80}, {  6.25f,   5.75f,  160},
+  {  5.25f,   5.00f,   40}, {  4.25f,   4.00f,   40}, {  3.25f,   3.25f,   40},
+  {  2.50f,   2.50f,   80}, {  1.25f,   1.25f,  120}, { -6.25f,  -5.00f,  200},
+  { -4.75f,  -3.75f,   40}, { -3.75f,  -2.75f,   40}, { -3.00f,  -2.25f,   80},
+  { -1.50f,  -1.25f,  120}, {  4.50f,   4.25f,  120}, {  3.25f,   3.00f,   80},
+  {  2.00f,   2.00f,   80}, {  1.00f,   1.00f,   80}, { -4.75f,  -3.00f,  120},
+  { -3.50f,  -2.25f,   80}, { -2.00f,  -1.25f,   80}, { -1.00f,  -0.75f,   80},
+  {  1.00f,   1.00f,  160}, { -2.00f,  -0.25f,  160}, { -1.00f,  -0.25f,  120},
+  {  0.00f,   0.00f,  300},
+};
+const int N_FLECHE = sizeof(FLECHE) / sizeof(FLECHE[0]);
 
 // ---------- Séquence 2 : cercle dynamique (cinématique inverse) ----------
 #define N_CERCLE 40
@@ -1039,7 +1069,6 @@ void startVSeq(const CmdV* seq, int len) {
   vseq_len = len;
   vseq_idx = 0;
   vseq_step_start = millis();
-  parcoursCharge = false;
   estModeFlecheNord = false;
   resetVitessePI();              // repart d'un état propre (intégrale, mesure)
   motionMode = MODE_VSEQ;
@@ -1050,6 +1079,7 @@ void controlVSeq() {
     brakeMoteurs();
     motionMode = MODE_IDLE;
     seq2Active = false;
+    estModeFlecheNord = false;
     etatRobot = "done";
     logMsg(">> DONE VSEQ paliers=" + String(vseq_idx));
     return;
@@ -1178,8 +1208,6 @@ void stopTout() {
   motionMode = MODE_IDLE;
   escalierPending = false;
   seq2Active = false;
-  parcoursCharge = false;
-  parcoursFini = true;
   estModeFlecheNord = false;
   stopRequested = true;
   brakeMoteurs();
@@ -1188,122 +1216,18 @@ void stopTout() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PID de navigation (flèche Nord) — Gregoire
+// Flèche Nord (séquence 3)
 // ═══════════════════════════════════════════════════════════════
-float calculerPID_Distance(float erreur, float dt) {
-  float P = KP_DIST * erreur;
-
-  integrale_dist += erreur * dt;
-  integrale_dist = constrain(integrale_dist, -0.5f, 0.5f);
-  float I = KI_DIST * integrale_dist;
-
-  float derivee = (erreur - erreurDist_precedente) / dt;
-  float D = KD_DIST * derivee;
-
-  erreurDist_precedente = erreur;
-  return P + I + D;
-}
-
-float calculerPID_Angle(float erreur, float dt) {
-  erreur = normaliserAngle(erreur);
-
-  float P = KP_ANGLE * erreur;
-
-  integrale_angle += erreur * dt;
-  integrale_angle = constrain(integrale_angle, -0.3f, 0.3f);
-  float I = KI_ANGLE * integrale_angle;
-
-  float derivee = normaliserAngle(erreur - erreurAngle_precedente) / dt;
-  float D = KD_ANGLE * derivee;
-
-  erreurAngle_precedente = erreur;
-  return P + I + D;
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Flèche Nord (séquence 3) — Gregoire
-// ═══════════════════════════════════════════════════════════════
-void loadNorthArrowSimplePath() {
-  // Flèche Nord simple, sans zigzag.
-  // Repère après alignement Nord :
-  //   x positif = direction Nord / avant robot, y positif = gauche.
-  //
-  // Séquence : tige -> pointe -> base gauche -> base droite -> pointe,
-  // puis triangles internes pour le remplissage (ET3.4 : >= 80 % colorié).
-  NB_POINTS = 0;
-
-  auto addPoint = [](float x, float y) {
-    if (NB_POINTS < MAX_POINTS) {
-      PARCOURS[NB_POINTS].x = x;
-      PARCOURS[NB_POINTS].y = y;
-      NB_POINTS++;
-    }
-  };
-
-  const float shaftEndX = 0.120f;  // 12 cm : tige
-  const float tipX      = 0.215f;  // pointe à 21,5 cm
-  const float baseTop   = 0.045f;  // coin haut/gauche
-  const float baseBot   = 0.029f;  // coin bas/droit raccourci (base plus droite)
-
-  // Départ stylo = (0,0)
-  // 1) Contour extérieur.
-  addPoint(shaftEndX, 0.000f);      // tige jusqu'au centre de la base
-  addPoint(tipX,      0.000f);      // trait central jusqu'à la pointe
-  addPoint(shaftEndX, baseTop);     // diagonale vers base gauche/haut
-  addPoint(shaftEndX, -baseBot);    // base vers base droite/bas
-  addPoint(tipX,      0.000f);      // diagonale retour pointe
-
-  // 2) Remplissage : triangles internes proportionnels, décalés à gauche
-  //    pour éviter le débordement à droite.
-  const int nbTrianglesInternes = 5;
-  const float echelles[nbTrianglesInternes] = {0.82f, 0.66f, 0.52f, 0.38f, 0.25f};
-
-  const float centreX = (tipX + shaftEndX + shaftEndX) / 3.0f - 0.010f;
-
-  for (int i = 0; i < nbTrianglesInternes; i++) {
-    float s = echelles[i];
-
-    float baseX_i = centreX + s * (shaftEndX - centreX);
-    float tipX_i  = centreX + s * (tipX - centreX) - 0.012f;
-    float top_i = baseTop * s * 0.90f;
-
-    // Le premier triangle interne descend plus bas, puis diminue.
-    float botBoost = (i == 0) ? 1.35f : ((i == 1) ? 1.20f : 1.05f);
-    float bot_i = baseBot * s * botBoost;
-
-    addPoint(baseX_i, 0.000f);
-    addPoint(tipX_i,  0.000f);
-    addPoint(baseX_i, top_i);
-    addPoint(baseX_i, -bot_i);
-    addPoint(tipX_i,  0.000f);
-  }
-
-  pointActuel = 0;
-  objectifAtteint = false;
-  parcoursFini = false;
-  estModeFlecheNord = true;
-  parcoursCharge = true;
-
-  integrale_dist = 0.0f;
-  integrale_angle = 0.0f;
-  erreurDist_precedente = 0.0f;
-  erreurAngle_precedente = 0.0f;
-  vG_prev = 0.0f;
-  vD_prev = 0.0f;
-  temps_precedent = millis();
-
-  etatRobot = "north_arrow_loaded";
-  logMsg("Fleche Nord chargee : tige + triangle");
-}
-
+// 1) Alignement sur le Nord magnétique (faceNorth, bloquant, interruptible)
+// 2) Remise à zéro du repère : stylo en (0,0), axe x = direction Nord
+// 3) Lecture de la séquence de vitesses FLECHE en boucle fermée (MODE_VSEQ),
+//    exactement comme la tractrice de l'escalier.
 void drawNorthArrowFixed() {
   // Étape 0 : on coupe tout mouvement en cours.
   motionMode = MODE_IDLE;
   escalierPending = false;
   seq2Active = false;
-  parcoursCharge = false;
-  parcoursFini = true;
-  objectifAtteint = false;
+  estModeFlecheNord = false;
   stopMoteurs();
 
   if (!auto_calibrated) {
@@ -1318,159 +1242,16 @@ void drawNorthArrowFixed() {
   faceNorth();
   if (stopRequested) return;
 
-  // Étape 2 : une fois aligné, on redéfinit le repère local :
+  // Étape 2 : une fois aligné, on redéfinit le repère local pour la carte :
   // stylo en (0,0), x positif = axe Nord.
-  resetParcours();
+  resetOdometrie();
 
-  // Étape 3 : on charge la flèche : tige -> pointe -> base -> remplissage.
-  loadNorthArrowSimplePath();
-
+  // Étape 3 : le tracé est une séquence de vitesses asservies (tige,
+  // pointe, remplissage), suivie par le PI de vitesse de chaque roue.
+  startVSeq(FLECHE, N_FLECHE);
+  estModeFlecheNord = true;   // flag d'affichage pour /data
   etatRobot = "north_arrow_running";
-  logMsg("Fleche Nord : dessin tige + triangle lance");
-}
-
-// Navigation multi-points au PID (utilisée uniquement par la flèche Nord ;
-// l'escalier et le cercle par points de passage du Gregoire ont été supprimés,
-// remplacés par les séquences Michka).
-void navigationMultiPoints() {
-  if (!parcoursCharge) {
-    stopMoteurs();
-    return;
-  }
-
-  if (parcoursFini) {
-    stopMoteurs();
-    digitalWrite(LEDU1, LOW);
-    digitalWrite(LEDU2, HIGH);
-    etatRobot = "done";
-    return;
-  }
-
-  if (objectifAtteint) {
-    // On enchaîne les points sans pause ni arrêt moteur : cela évite les
-    // cassures entre la tige et la pointe, puis sur la base du triangle.
-    if (pointActuel < NB_POINTS - 1) {
-      pointActuel++;
-      objectifAtteint = false;
-      integrale_dist = 0.0f;
-      integrale_angle = 0.0f;
-      erreurDist_precedente = 0.0f;
-      erreurAngle_precedente = 0.0f;
-      return;
-    }
-
-    stopMoteurs();
-    digitalWrite(LEDU1, HIGH);
-    digitalWrite(LEDU2, HIGH);
-
-    if (millis() - tempsArrivePoint > PAUSE_ENTRE_POINTS) {
-      parcoursFini = true;
-      parcoursCharge = false;
-      estModeFlecheNord = false;
-      etatRobot = "done";
-      logMsg("Parcours termine");
-    }
-    return;
-  }
-
-  unsigned long now = millis();
-  float dt = (now - temps_precedent) / 1000.0f;
-  if (dt <= 0.0f || dt > 0.2f) dt = 0.02f;
-  temps_precedent = now;
-
-  double xs, ys;
-  getPositionStylo(xs, ys);
-
-  float tx = PARCOURS[pointActuel].x;
-  float ty = PARCOURS[pointActuel].y;
-
-  float dx = tx - xs;
-  float dy = ty - ys;
-  float dist = sqrt(dx * dx + dy * dy);
-
-  // Tolérances spécifiques flèche (segments internes plus permissifs)
-  bool segmentInterneTol = pointActuel >= 5;
-  bool segmentBaseTol = pointActuel == 3;
-  float currentTolerance = segmentBaseTol ? 0.010f
-                          : (segmentInterneTol ? 0.009f : 0.006f);
-
-  if (dist < currentTolerance) {
-    objectifAtteint = true;
-    tempsArrivePoint = now;
-    // Pas d'arrêt entre les points : segments mieux enchaînés.
-    return;
-  }
-
-  digitalWrite(LEDU1, (now / 500) % 2);
-  digitalWrite(LEDU2, LOW);
-
-  float angleCible = atan2(dy, dx);
-  float errA = normaliserAngle(angleCible - theta_robot);
-
-  // Si le point est derrière le robot, on ne fait pas demi-tour :
-  // on garde quasiment le même axe et on y va en marche arrière.
-  // Cela évite les grands zigzags sur les diagonales du triangle.
-  bool marcheArriere = false;
-  bool segmentBaseFleche = (pointActuel == 3);
-  bool segmentInterneFleche = (pointActuel >= 5);
-
-  if (fabs(errA) > PI / 2.0f) {
-    marcheArriere = true;
-    angleCible = normaliserAngle(angleCible + PI);
-    errA = normaliserAngle(angleCible - theta_robot);
-  }
-
-  // Plus lent et plus stable pour les diagonales et la marche arrière.
-  float speedFactor;
-  if (dist < 0.03f) speedFactor = 0.32f;
-  else if (dist < 0.06f) speedFactor = 0.42f;
-  else speedFactor = 0.52f;
-
-  if (fabs(errA) > 0.6f) {
-    speedFactor *= 0.65f;
-  }
-
-  float cmdD = calculerPID_Distance(dist, dt) * speedFactor;
-  if (marcheArriere) {
-    cmdD = -cmdD;
-  }
-
-  float cmdA = calculerPID_Angle(errA, dt);
-
-  // En marche arrière, la correction de direction doit être inversée.
-  // Sur la base du triangle, on corrige davantage (décalage latéral).
-  cmdA *= segmentBaseFleche ? 0.55f : (segmentInterneFleche ? 0.42f : 0.50f);
-  if (marcheArriere) {
-    cmdA = -cmdA;
-  }
-
-  if (fabs(cmdD) < VITESSE_MIN && fabs(cmdD) > 0.0f) {
-    cmdD = (cmdD > 0) ? VITESSE_MIN : -VITESSE_MIN;
-  }
-
-  float maxSpeed = segmentBaseFleche ? 210.0f : (marcheArriere ? 215.0f : 230.0f);
-
-  float vG = constrain(cmdD, -maxSpeed, maxSpeed) - cmdA;
-  float vD = constrain(cmdD, -maxSpeed, maxSpeed) + cmdA;
-
-  // Limiteur de variation par itération (boucle cadencée à 50 Hz).
-  float MAX_CHANGE = segmentBaseFleche ? 5.0f : (marcheArriere ? 12.0f : 16.0f);
-  vG = constrain(vG, vG_prev - MAX_CHANGE, vG_prev + MAX_CHANGE);
-  vD = constrain(vD, vD_prev - MAX_CHANGE, vD_prev + MAX_CHANGE);
-
-  vG_prev = vG;
-  vD_prev = vD;
-
-  setMoteurs(vG, vD);
-  etatRobot = marcheArriere ? "arrow_reverse" : "arrow_forward";
-
-  static unsigned long lastArrowDebug = 0;
-  if (millis() - lastArrowDebug > 250) {
-    lastArrowDebug = millis();
-    Serial.printf("[ARROW] pt=%d/%d reverse=%d base=%d dist=%.3f errA=%.2f cmdD=%.1f cmdA=%.1f vG=%.1f vD=%.1f\n",
-                  pointActuel + 1, NB_POINTS, marcheArriere ? 1 : 0, segmentBaseFleche ? 1 : 0,
-                  dist, errA, cmdD, cmdA, vG, vD);
-  }
+  logMsg(">> Fleche Nord : sequence V lancee (" + String(N_FLECHE) + " paliers)");
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1658,14 +1439,11 @@ void handleData() {
   bool magOk = readRawMagnetometer(mx, my, mz);
   float heading = magOk ? headingFromRaw(mx, my) : -1.0f;
 
-  // Avancement : séquence V (escalier/cercle) ou flèche Nord
+  // Avancement de la séquence V en cours (escalier, cercle ou flèche)
   int pt = 0, pts = 0;
   if (motionMode == MODE_VSEQ) {
     pt = vseq_idx + 1;
     pts = vseq_len;
-  } else if (parcoursCharge || estModeFlecheNord) {
-    pt = pointActuel + 1;
-    pts = NB_POINTS;
   }
 
   String staIp = (WiFi.status() == WL_CONNECTED) ? WiFi.localIP().toString() : "";
@@ -1679,8 +1457,8 @@ void handleData() {
   j += "\"ticksG\":" + String(g) + ",";
   j += "\"point\":" + String(pt) + ",";
   j += "\"points\":" + String(pts) + ",";
-  j += "\"loaded\":" + String((parcoursCharge || motionMode != MODE_IDLE) ? "true" : "false") + ",";
-  j += "\"finished\":" + String(parcoursFini ? "true" : "false") + ",";
+  j += "\"loaded\":" + String((motionMode != MODE_IDLE) ? "true" : "false") + ",";
+  j += "\"finished\":" + String((motionMode == MODE_IDLE) ? "true" : "false") + ",";
   j += "\"circle\":" + String(seq2Active ? "true" : "false") + ",";
   j += "\"arrow_mode\":" + String(estModeFlecheNord ? "true" : "false") + ",";
   j += "\"radius\":" + String(rayonCercle, 2) + ",";
@@ -1718,10 +1496,8 @@ void handleCommand() {
     drawNorthArrowFixed();
     return;
   } else if (cmd == "reset") {
-    resetParcours();
-    parcoursCharge = false;
+    resetOdometrie();
     seq2Active = false;
-    estModeFlecheNord = false;
   } else if (cmd == "stop") {
     stopTout();
   } else if (cmd == "mag_calib") {
@@ -1751,8 +1527,6 @@ void handleManual() {
   motionMode = MODE_IDLE;
   escalierPending = false;
   seq2Active = false;
-  parcoursCharge = false;
-  parcoursFini = true;
   estModeFlecheNord = false;
 
   if (dir == "f") {
@@ -1774,30 +1548,18 @@ void handleManual() {
 // Lecture (et réglage optionnel via paramètres GET) de tous les gains.
 // Le panneau PID du HTML ne fait que LIRE ces valeurs.
 void handlePID() {
-  if (server.hasArg("kp_dist"))  KP_DIST  = server.arg("kp_dist").toFloat();
-  if (server.hasArg("ki_dist"))  KI_DIST  = server.arg("ki_dist").toFloat();
-  if (server.hasArg("kd_dist"))  KD_DIST  = server.arg("kd_dist").toFloat();
-  if (server.hasArg("kp_angle")) KP_ANGLE = server.arg("kp_angle").toFloat();
-  if (server.hasArg("ki_angle")) KI_ANGLE = server.arg("ki_angle").toFloat();
-  if (server.hasArg("kd_angle")) KD_ANGLE = server.arg("kd_angle").toFloat();
-  if (server.hasArg("kp_turn"))  KP_TURN  = server.arg("kp_turn").toFloat();
-  if (server.hasArg("ki_turn"))  KI_TURN  = server.arg("ki_turn").toFloat();
-  if (server.hasArg("kd_turn"))  KD_TURN  = server.arg("kd_turn").toFloat();
-  if (server.hasArg("kp_v"))     KP_V     = server.arg("kp_v").toFloat();
-  if (server.hasArg("ki_v"))     KI_V     = server.arg("ki_v").toFloat();
+  if (server.hasArg("kp_turn")) KP_TURN = server.arg("kp_turn").toFloat();
+  if (server.hasArg("ki_turn")) KI_TURN = server.arg("ki_turn").toFloat();
+  if (server.hasArg("kd_turn")) KD_TURN = server.arg("kd_turn").toFloat();
+  if (server.hasArg("kp_v"))    KP_V    = server.arg("kp_v").toFloat();
+  if (server.hasArg("ki_v"))    KI_V    = server.arg("ki_v").toFloat();
 
   String j = "{";
   j += "\"kp_turn\":" + String(KP_TURN, 3) + ",";
   j += "\"ki_turn\":" + String(KI_TURN, 3) + ",";
   j += "\"kd_turn\":" + String(KD_TURN, 3) + ",";
   j += "\"kp_v\":" + String(KP_V, 2) + ",";
-  j += "\"ki_v\":" + String(KI_V, 1) + ",";
-  j += "\"kp_dist\":" + String(KP_DIST, 3) + ",";
-  j += "\"ki_dist\":" + String(KI_DIST, 3) + ",";
-  j += "\"kd_dist\":" + String(KD_DIST, 3) + ",";
-  j += "\"kp_angle\":" + String(KP_ANGLE, 3) + ",";
-  j += "\"ki_angle\":" + String(KI_ANGLE, 3) + ",";
-  j += "\"kd_angle\":" + String(KD_ANGLE, 3);
+  j += "\"ki_v\":" + String(KI_V, 1);
   j += "}";
   server.send(200, "application/json", j);
 }
@@ -1915,7 +1677,7 @@ void setup() {
   tcpServer.begin();
 
   stopMoteurs();
-  resetParcours();
+  resetOdometrie();
   etatRobot = "idle";
   lastMessage = "Pret";
   digitalWrite(LEDU1, HIGH);
@@ -1942,14 +1704,6 @@ void loop() {
     if (motionMode == MODE_TICKS)      controlTicks();
     else if (motionMode == MODE_TURN)  controlTurnGyro();
     else if (motionMode == MODE_VSEQ)  controlVSeq();
-  }
-
-  // Navigation flèche Nord (PID dist + angle), cadencée à 50 Hz comme
-  // dans le projet d'origine (le dt et les limiteurs en dépendent).
-  static unsigned long derniereNav = 0;
-  if (parcoursCharge && motionMode == MODE_IDLE && millis() - derniereNav >= 20) {
-    derniereNav = millis();
-    navigationMultiPoints();
   }
 
   // Annonce de l'IP locale quand la connexion STA aboutit

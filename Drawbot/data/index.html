@@ -90,8 +90,6 @@ canvas{width:100%;height:650px;border-radius:20px;background:#fbfdff;border:1px 
 <h3>PID (valeurs firmware)</h3>
 <div class="val"><span>Virage gyro Kp/Ki/Kd</span><b id="pid_turn">—</b></div>
 <div class="val"><span>PI vitesse roues Kp/Ki</span><b id="pid_v">—</b></div>
-<div class="val"><span>Flèche distance Kp/Ki/Kd</span><b id="pid_dist">—</b></div>
-<div class="val"><span>Flèche angle Kp/Ki/Kd</span><b id="pid_angle">—</b></div>
 </section>
 </div>
 
@@ -148,8 +146,6 @@ async function fetchPID(){
   const p=await (await fetch('/pid')).json();
   pid_turn.textContent=`${p.kp_turn} / ${p.ki_turn} / ${p.kd_turn}`;
   pid_v.textContent=`${p.kp_v} / ${p.ki_v}`;
-  pid_dist.textContent=`${p.kp_dist} / ${p.ki_dist} / ${p.kd_dist}`;
-  pid_angle.textContent=`${p.kp_angle} / ${p.ki_angle} / ${p.kd_angle}`;
  }catch(e){}
 }
 
